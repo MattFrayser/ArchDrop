@@ -54,7 +54,6 @@ pub fn test_encryption() {
     println!("Same Key");
     println!("Encrypted1: {:?}", &enc1[..10]);
     println!("Encrypted2: {:?}", &enc2[..10]);
-    println!("Equal? {} ✅ (expected)\n", enc1 == enc2);
     
     // Test 2: Different encryptor (different key)
     let encryptor2 = Encryptor::new();  // New random key
@@ -64,7 +63,6 @@ pub fn test_encryption() {
     println!("Different Key");
     println!("Encrypted1: {:?}", &enc1[..10]);
     println!("Encrypted3: {:?}", &enc3[..10]);
-    println!("Equal? {} ✅ (expected: false)\n", enc1 == enc3);
     
     // Test 3: Multiple chunks increment nonce
     let mut stream4 = encryptor.create_stream_encryptor();
@@ -74,5 +72,4 @@ pub fn test_encryption() {
     println!("Different Chunks (nonce increments)");
     println!("Chunk1: {:?}", &chunk1[..8]);
     println!("Chunk2: {:?}", &chunk2[..8]);
-    println!("Equal? {} ✅ (expected: false)", chunk1 == chunk2);
 }

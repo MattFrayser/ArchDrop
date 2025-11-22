@@ -28,7 +28,7 @@ enum Commands {
 #[tokio::main]
 async fn main() {
     
-    test_encryption();
+    // test_encryption();
     // Reads std::env::args(), matches against struct def
     let cli = Cli::parse();
 
@@ -46,7 +46,7 @@ async fn main() {
             
             println!("Sending: {}", file.display());
 
-            //server::start_server().await.unwrap();
+            server::start_server(file).await.unwrap();
         }
     }
 }
