@@ -1,4 +1,4 @@
-mod server;
+use archdrop::server;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 

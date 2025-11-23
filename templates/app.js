@@ -50,7 +50,7 @@ async function startDownload() {
             while (buffer.length >= 4) {
                 // read prefix
                 const lengthView = new DataView(buffer.buffer, buffer.byteOffset,  4)
-                const chunkLength = lengthView.getInt32(0) // # encrpted bytes
+                const chunkLength = lengthView.getUint32(0) // # encrpted bytes
 
                 if (buffer.length < 4 + chunkLength) {
                     break // dont have full chunk yet
@@ -134,7 +134,7 @@ function generateNonce(nonceBase64, counter) {
 
     // last 5 bytes
     const view = new DataView(nonce.buffer)
-    view.setUint32(8, counter, false) // false = BE32
+    view.setUint32(7, counter, false) // false = BE32
 
     return nonce
 }
