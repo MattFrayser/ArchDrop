@@ -53,8 +53,8 @@ impl TransferUI {
                     .direction(Direction::Horizontal)
                     .margin(2)
                     .constraints([
-                        Constraint::Percentage(40),
-                        Constraint::Percentage(60)
+                        Constraint::Percentage(100),
+                        Constraint::Percentage(0)
                     ])
                     .split(f.size());
             
@@ -90,10 +90,10 @@ impl TransferUI {
                     .wrap(Wrap { trim: false });
                 f.render_widget(url, left_side[3]);
 
-               let qr = Paragraph::new(self.qr_code.clone())
-                    .block(Block::default().title("Scan").borders(Borders::ALL))
-                    .alignment(ratatui::layout::Alignment::Center);
-                f.render_widget(qr, sides[1]);
+               // let qr = Paragraph::new(self.qr_code.clone())
+               //     .block(Block::default().title("Scan").borders(Borders::ALL))
+               //     .alignment(ratatui::layout::Alignment::Center);
+               // f.render_widget(qr, sides[1]);
 
 
             })?;

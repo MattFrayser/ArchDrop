@@ -1,6 +1,6 @@
 use archdrop::server;
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // Clap reads this struct and creates CLI 
 #[derive(Parser)] // generates arg parsing code at compile time
@@ -19,7 +19,7 @@ enum Commands {
 
     Send {
         #[arg(help = "Path to file to send")]
-        file: PathBuf, // PathBuf for typesafe paths 
+        path: PathBuf, // PathBuf for typesafe paths 
     },
 }
 
@@ -32,20 +32,35 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Send { file } => {
+        Commands::Send { path } => {
 
             // PathBuf.exits(); Check for file before spinning up
             // fail fast on no file
-            if !file.exists() {
+            if !path.exists() {
                 // file.display() formats paths
-                eprintln!("Error: File not found: {}", file.display());
+                eprintln!("Error: File not found: {}", path.display());
                 std::process::exit(1);
-
             }
-            
-            println!("Sending: {}", file.display());
 
-            server::start_server(file).await.unwrap();
+            // sending folder
+            let (file_to_send, cleanup_path) = if path.is_dir() {
+                let zip_path = create_zip_from_dir(&path).await.unwrap();
+                (zip_path.clone(), Some(zip_path)) 
+            } else {
+                // singe file 
+                (path, None)
+            };
+            
+            server::start_server(file_to_send).await.unwrap();
+
+            // cleanup temp zip
+            if let Some(temp_path) = cleanup_path {
+                let _ = tokio::fs::remove_file(temp_path).await;
+            }
         }
     }
+}
+
+async fn create_zip_from_dir(dir: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    todo!()
 }

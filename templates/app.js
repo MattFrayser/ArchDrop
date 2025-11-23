@@ -29,10 +29,22 @@ async function startDownload() {
         // Fetch encrypted stream from server 
         const token = window.location.pathname.split('/').pop()
         const response = await fetch(`/download/${token}/data`)
-
         console.log('Response status:', response.status);
         console.log('Response headers:', Object.fromEntries(response.headers.entries()));
 
+        // Parse filename from headers
+        let filename = 'download';
+        const contentDisposition = response.headers.get('Content-Disposition');
+        console.log('Content-Disposition:', contentDisposition); 
+
+        if (contentDisposition) {
+            filenameMatch = contentDisposition.match(/filename="?([^"]+)"?/);
+            if (filenameMatch) {
+                filename = filenameMatch[1];
+            }
+        }
+
+        console.log('Using filename:', filename); 
 
         const reader = response.body.getReader()
         let buffer = new Uint8Array(0)
@@ -92,7 +104,7 @@ async function startDownload() {
         const url = URL.createObjectURL(blob)
         const a = document.createElement('a')
         a.href = url
-        a.download = 'downloaded_file'
+        a.download = filename
         a.click()
 
     } catch(error) {

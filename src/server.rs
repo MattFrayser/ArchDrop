@@ -161,6 +161,12 @@ async fn download_handler(
     println!("Token validated and marked as used");
     println!("Original file: {}", file_path);
 
+    // Extract filename 
+    let filename = std::path::Path::new(&file_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("download"); // default to generic 'download'
+
     // open file asynchronously to not block thread
     let file = File::open(&file_path).await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?; // Error -> 500
@@ -224,9 +230,10 @@ async fn download_handler(
     );
 
     println!("Starting stream");
-    // Convert Stream to HTTP res body
-    // Axum pulls items from stream and sends to client as produced
-    Ok(Response::new(Body::from_stream(stream)))
+    Response::builder()
+        .header("Content-Disposition", format!("attachment; filename=\"{}\"", filename))
+        .body(Body::from_stream(stream))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 async fn serve_page() -> Result<Html<&'static str>, StatusCode> {
