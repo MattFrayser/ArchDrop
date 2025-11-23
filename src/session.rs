@@ -56,4 +56,12 @@ impl SessionStore {
         // Token doesnt exists or is already used
         None
     }
+
+    // check if token exists and is not used (read only)
+    pub async fn is_valid(&self, token: &str) -> bool {
+        let sessions = self.sessions.lock().await;
+        sessions.get(token)
+            .map(|session| !session.used)
+            .unwrap_or(false)
+    }
 }

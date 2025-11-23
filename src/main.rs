@@ -1,5 +1,4 @@
 mod server;
-use archdrop::crypto::test_encryption;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 

@@ -1,20 +1,38 @@
 use axum::{Router, routing::get};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use tokio::fs::File;
+use tokio::io::AsyncReadExt;
+use axum::body::Body;
+use axum::response::Response;
+use axum::http::StatusCode;
+use axum::extract::{Path, State};
+use axum::response::Html;
+use futures::stream::{self,StreamExt};
+use std::sync::Arc;
+
+use archdrop::session::SessionStore;
+use archdrop::crypto::Encryptor;
 
 pub async fn start_server(file_path: PathBuf) -> Result<u16, Box<dyn std::error::Error>> {
     //  port left 0 for OS to choose
     let addr = SocketAddr::from(([0, 0, 0, 0], 0)); // listen on all interfaces
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    let actual_port = listener.local_addr()?.port();
+    let port = listener.local_addr()?.port();
 
     let sessions = SessionStore::new();
     let encryptor = Encryptor::new();
+    
+    let key = encryptor.get_key_base64();
+    let nonce = encryptor.get_nonce_base64();
 
     let token = sessions.create_session(file_path.to_string_lossy().to_string()).await;
 
     println!("Token: {}", token);
-    println!("URL: http://127.0.0.1:{}/download/{}", actual_port, token);
+    println!(
+        "URL: http://127.0.0.1:{}/download/{}#key={}&nonce={}",
+        port, token, key, nonce
+    );
 
     let state = AppState {
         sessions, 
@@ -25,27 +43,17 @@ pub async fn start_server(file_path: PathBuf) -> Result<u16, Box<dyn std::error:
     // Create axium router
     let app = Router::new()
         .route("/health", get(|| async { "OK" }))
-        .route("/download/:token", get(download_handler))
+        .route("/download/:token", get(serve_page))
+        .route("/download/:token/data", get(download_handler))
+        .route("/app.js", get(serve_js))
         .with_state(state);
 
 
     // Start server
     axum::serve(listener, app).await?;
 
-    Ok(actual_port)
+    Ok(port)
 }
-
-use tokio::fs::File;
-use tokio::io::AsyncReadExt;
-use axum::body::Body;
-use axum::response::Response;
-use axum::http::StatusCode;
-use axum::extract::{Path, State};
-use futures::stream::{self,StreamExt};
-use std::sync::Arc;
-
-use archdrop::session::SessionStore;
-use archdrop::crypto::Encryptor;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -57,7 +65,8 @@ async fn download_handler(
     Path(token): Path<String>, 
     State(state): State<AppState>,
 ) -> Result<Response, StatusCode> {
-    
+
+    println!("Download req for token: {}", token);
     // validate token and get file path
     let file_path = state.sessions
         .validate_and_mark_used(&token)
@@ -111,9 +120,34 @@ async fn download_handler(
     },
     );
 
+    println!("Starting stream");
     // Convert Stream to HTTP res body
     // Axum pulls items from stream and sends to client as produced
     Ok(Response::new(Body::from_stream(stream)))
+}
+
+async fn serve_page(
+    Path(token): Path<String>,
+    State(state): State<AppState>,
+) -> Result<Html<&'static str>, StatusCode> {
+
+    if !state.sessions.is_valid(&token).await {
+        println!("token invalid or used");
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // return embedded html to brower
+    const HTML: &str = include_str!("../templates/download.html");
+    Ok(Html(HTML))
+}
+
+const JS: &str = include_str!("../templates/app.js");
+
+async fn serve_js() -> Response {
+    Response::builder()
+        .header("content-type", "application/javascript")
+        .body(Body::from(JS))
+        .unwrap()
 }
 
 

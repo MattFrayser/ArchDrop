@@ -12,3 +12,5 @@ aes-gcm = { version = "0.10", features = ["stream"] }
 base64 = "0.21"
 rand = "0.8"
 futures = "0.3"
+sha2 = "0.10.9"
+qrcode = "0.13"

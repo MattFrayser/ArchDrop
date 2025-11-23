@@ -8,6 +8,7 @@ use rand::RngCore;
 use sha2::{Sha256, Digest};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
+use base64::{Engine as _, engine::general_purpose};
 
 pub struct Encryptor {
     key: [u8; 32], 
@@ -36,11 +37,11 @@ impl Encryptor {
         EncryptorBE32::new(key, nonce)
     }
     pub fn get_key_base64(&self) -> String {
-        base64::encode(&self.key)
+        general_purpose::URL_SAFE_NO_PAD.encode(&self.key)
     }
 
     pub fn get_nonce_base64(&self) -> String {
-        base64::encode(&self.nonce)
+        general_purpose::URL_SAFE_NO_PAD.encode(&self.nonce)
     }
 }
 
