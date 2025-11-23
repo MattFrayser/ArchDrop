@@ -5,6 +5,9 @@ use aes_gcm::{
     Aes256Gcm,
 };
 use rand::RngCore;
+use sha2::{Sha256, Digest};
+use tokio::fs::File;
+use tokio::io::AsyncReadExt;
 
 pub struct Encryptor {
     key: [u8; 32], 
@@ -41,35 +44,23 @@ impl Encryptor {
     }
 }
 
-pub fn test_encryption() {
-    // Test 1: Same encryptor
-    let encryptor = Encryptor::new();
-    let mut stream1 = encryptor.create_stream_encryptor();
-    let mut stream2 = encryptor.create_stream_encryptor();
-    
-    let plaintext = b"Test";
-    let enc1 = stream1.encrypt_last(plaintext.as_ref()).unwrap();
-    let enc2 = stream2.encrypt_last(plaintext.as_ref()).unwrap();
-    
-    println!("Same Key");
-    println!("Encrypted1: {:?}", &enc1[..10]);
-    println!("Encrypted2: {:?}", &enc2[..10]);
-    
-    // Test 2: Different encryptor (different key)
-    let encryptor2 = Encryptor::new();  // New random key
-    let mut stream3 = encryptor2.create_stream_encryptor();
-    let enc3 = stream3.encrypt_last(plaintext.as_ref()).unwrap();
-    
-    println!("Different Key");
-    println!("Encrypted1: {:?}", &enc1[..10]);
-    println!("Encrypted3: {:?}", &enc3[..10]);
-    
-    // Test 3: Multiple chunks increment nonce
-    let mut stream4 = encryptor.create_stream_encryptor();
-    let chunk1 = stream4.encrypt_next(b"First".as_ref()).unwrap();
-    let chunk2 = stream4.encrypt_last(b"Second".as_ref()).unwrap();
-    
-    println!("Different Chunks (nonce increments)");
-    println!("Chunk1: {:?}", &chunk1[..8]);
-    println!("Chunk2: {:?}", &chunk2[..8]);
+pub async fn calculate_file_hash(path: &str) -> Result<String, std::io::Error> {
+    let mut file = File::open(path).await?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
+
+    loop {
+        let n = file.read(&mut buffer).await?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+    }
+
+    let result = hasher.finalize();
+    Ok(format!("{:x}", result))
 }
+
+
+
+
