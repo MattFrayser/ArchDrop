@@ -15,7 +15,6 @@ use tokio::sync::watch;
 pub struct TransferUI {
     progress: watch::Receiver<f64>, // tokio channel for watching values
     file_name: String,
-    file_hash: String,
     qr_code: String,
     url: String,
 }
@@ -24,14 +23,12 @@ impl TransferUI {
     pub fn new(
         progress: watch::Receiver<f64>,
         file_name: String,
-        file_hash: String,
         qr_code: String,
         url: String,
     ) -> Self {
         Self {
             progress,
             file_name,
-            file_hash,
             qr_code,
             url,
         }
@@ -84,10 +81,6 @@ impl TransferUI {
                     .gauge_style(ratatui::style::Style::default().fg(ratatui::style::Color::Green))
                     .percent(progress as u16);
                 f.render_widget(progress_bar, left_side[1]);
-
-                let hash = Paragraph::new(format!("SHA-256: {}", self.file_hash))
-                    .block(Block::default().borders(Borders::ALL));
-                f.render_widget(hash, left_side[2]);
 
                 // OSC 8 hyperlink format: \x1b]8;;URL\x1b\\TEXT\x1b]8;;\x1b\\
                 let url = Paragraph::new(format!("{}", self.url)).wrap(Wrap { trim: false });

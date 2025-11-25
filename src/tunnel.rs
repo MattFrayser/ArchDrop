@@ -1,3 +1,4 @@
+use regex::Regex;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
@@ -102,35 +103,8 @@ impl CloudflareTunnel {
     }
 
     fn extract_url(line: &str) -> Option<String> {
-        if line.contains("trycloudflare.com") {
-            // Find where https:// starts
-            if let Some(start) = line.find("https://") {
-                let rest = &line[start..];
-
-                // Extract until whitespace or box characters
-                let url = rest
-                    .split_whitespace()
-                    .next()?
-                    .trim_end_matches(&[',', '.', ';', '|', '+', '-', ' ', '"', ')', ']'][..]);
-
-                // Verify it's a valid URL
-                // Looking for https://random.trycloudflare.com
-                if url.starts_with("https://")
-                    && url.contains("trycloudflare.com")
-                    && !url.contains("api.trycloudflare.com")
-                    && !url.contains("/tunnel")
-                {
-                    // ensure proper ending
-                    if let Some(end_idx) = url.find(".trycloudflare.com") {
-                        let url_part = &url[..end_idx + ".trycloudflare.com".len()];
-
-                        return Some(url_part.to_string());
-                    }
-                }
-            }
-        }
-
-        None
+        let re = Regex::new(r"https://[a-z0-9-]+\.trycloudflare\.com").ok()?;
+        re.find(line).map(|m| m.as_str().to_string())
     }
 }
 
