@@ -7,7 +7,6 @@ use axum::response::{Html, Response};
 use futures::stream;
 use futures::StreamExt;
 use std::sync::Arc;
-use std::usize;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::watch;
