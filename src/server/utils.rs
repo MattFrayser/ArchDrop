@@ -1,10 +1,9 @@
 use crate::tui::TransferUI;
+use axum_server::tls_rustls::RustlsConfig;
+use rcgen::generate_simple_self_signed;
 use std::net::UdpSocket;
 use tokio::signal;
 use tokio::sync::watch;
-
-use axum_server::tls_rustls::RustlsConfig;
-use rcgen::generate_simple_self_signed;
 
 pub async fn wait_for_server_ready(
     port: u16,
@@ -38,14 +37,14 @@ pub fn spawn_tui(
     file_name: String,
     qr_code: String,
     is_recieving: bool,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut ui = TransferUI::new(progress, file_name, qr_code, is_recieving);
 
         if let Err(e) = ui.run().await {
             eprintln!("ui err: {}", e);
         }
-    });
+    })
 }
 
 pub fn shutdown_handler(handle: axum_server::Handle) {

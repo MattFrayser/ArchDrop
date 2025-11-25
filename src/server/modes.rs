@@ -45,7 +45,7 @@ pub async fn start_local(
     println!("{}", url);
 
     let qr_code = qr::generate_qr(&url);
-    utils::spawn_tui(
+    let tui_handle = utils::spawn_tui(
         server.progress_consumer,
         server.file_name,
         qr_code,
@@ -54,7 +54,16 @@ pub async fn start_local(
 
     // HTTPS Server
     let handle = axum_server::Handle::new();
-    utils::shutdown_handler(handle.clone());
+
+    // Spawn shutdown waiter
+    let shutdown_handle = handle.clone();
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = tui_handle => {}
+            _ = tokio::signal::ctrl_c() => {}
+        }
+        shutdown_handle.shutdown();
+    });
 
     // Start server
     axum_server::bind_rustls(addr, tls_config)
@@ -79,7 +88,7 @@ pub async fn start_http(
     } = server;
     // Start local HTTP
     let spinner = output::spinner("Starting local server...");
-    let port = spawn_http_server(app).await?;
+    let (port, server_handle) = spawn_http_server(app).await?;
     spinner.set_message(format!("Waiting for server on port {}...", port));
 
     // Wait for server to be ready before starting tunnel
@@ -97,12 +106,18 @@ pub async fn start_http(
     );
     println!("{url}");
 
-    // Make Tui
+    // Spawn TUI and get handle
     let qr_code = qr::generate_qr(&url);
-    utils::spawn_tui(progress_consumer, file_name, qr_code, service == "upload");
+    let tui_handle = utils::spawn_tui(progress_consumer, file_name, qr_code, service == "upload");
 
-    // Keep tunnel alive until Ctrl-C
-    tokio::signal::ctrl_c().await?;
+    // Wait for TUI to exit or Ctrl+C
+    tokio::select! {
+        _ = tui_handle => {}
+        _ = tokio::signal::ctrl_c() => {}
+    }
+
+    // Graceful shutdown
+    server_handle.shutdown();
 
     Ok(port)
 }
@@ -121,7 +136,7 @@ pub async fn start_tunnel(
     } = server;
     // Start local HTTP
     let spinner = output::spinner("Starting local server...");
-    let port = spawn_http_server(app).await?;
+    let (port, server_handle) = spawn_http_server(app).await?;
     spinner.set_message(format!("Waiting for server on port {}...", port));
 
     // Wait for server to be ready before starting tunnel
@@ -146,16 +161,23 @@ pub async fn start_tunnel(
     );
     println!("{}", url);
 
+    // Spawn TUI and get handle
     let qr_code = qr::generate_qr(&url);
-    utils::spawn_tui(progress_consumer, file_name, qr_code, service == "upload");
+    let tui_handle = utils::spawn_tui(progress_consumer, file_name, qr_code, service == "upload");
 
-    // Keep tunnel alive until Ctrl-C
-    tokio::signal::ctrl_c().await?;
+    // Wait for TUI to exit or Ctrl+C
+    tokio::select! {
+        _ = tui_handle => {}
+        _ = tokio::signal::ctrl_c() => {}
+    }
+
+    // Graceful shutdown
+    server_handle.shutdown();
 
     Ok(port)
 }
 
-async fn spawn_http_server(app: Router) -> Result<u16, Box<dyn std::error::Error>> {
+async fn spawn_http_server(app: Router) -> Result<(u16, axum_server::Handle), Box<dyn std::error::Error>> {
     // Get random port
     let addr = SocketAddr::from(([0, 0, 0, 0], 0));
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -177,6 +199,5 @@ async fn spawn_http_server(app: Router) -> Result<u16, Box<dyn std::error::Error
         }
     });
 
-    utils::shutdown_handler(handle);
-    Ok(port)
+    Ok((port, handle))
 }

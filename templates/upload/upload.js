@@ -180,13 +180,21 @@ async function uploadFile() {
         const token = window.location.pathname.split('/').pop();
         const blob = new Blob(encryptedFrames);
 
+        // Create 8-byte size header (big-endian u64)
+        const sizeHeader = new ArrayBuffer(8);
+        const sizeView = new DataView(sizeHeader);
+        sizeView.setBigUint64(0, BigInt(blob.size), false); // false = big-endian
+
+        // Combine size header + encrypted data
+        const bodyWithSize = new Blob([sizeHeader, blob]);
+
         const response = await fetch(`/upload/${token}/data`, {
             method: 'POST',
-            body: blob,
+            body: bodyWithSize,
             headers: {
                 'Content-Type': 'application/octet-stream',
-                'X-Filename': selectedFiles.length === 1 
-                    ? selectedFiles[0].name 
+                'X-Filename': selectedFiles.length === 1
+                    ? selectedFiles[0].name
                     : 'upload.zip',
             }
         });
