@@ -2,12 +2,14 @@ use crate::crypto::Encryptor;
 use crate::session::SessionStore;
 use axum::body::Body;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, Response};
 use futures::stream;
+use futures::StreamExt;
 use std::sync::Arc;
+use std::usize;
 use tokio::fs::File;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::watch;
 
 #[derive(Clone)]
@@ -118,14 +120,114 @@ pub async fn download_handler(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-pub async fn serve_page() -> Result<Html<&'static str>, StatusCode> {
+pub async fn serve_download_page() -> Result<Html<&'static str>, StatusCode> {
     // return embedded html to brower
-    const HTML: &str = include_str!("../../templates/download.html");
+    const HTML: &str = include_str!("../../templates/download/download.html");
     Ok(Html(HTML))
 }
 
-pub async fn serve_js() -> Response {
-    const JS: &str = include_str!("../../templates/app.js");
+pub async fn serve_download_js() -> Response {
+    const JS: &str = include_str!("../../templates/download/download.js");
+    Response::builder()
+        .header("content-type", "application/javascript; charset=utf-8")
+        .body(Body::from(JS))
+        .unwrap()
+}
+
+pub async fn upload(
+    Path(token): Path<String>,
+    State(state): State<AppState>,
+    _headers: HeaderMap,
+    body: Body,
+) -> Result<Response, StatusCode> {
+    // Validate token
+    let dest_dir = state
+        .sessions
+        .validate_and_mark_used(&token)
+        .await
+        .ok_or(StatusCode::FORBIDDEN)?;
+
+    // naming
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let filename = format!("upload_{}.zip", timestamp);
+    let dest_path = std::path::Path::new(&dest_dir).join(&filename);
+
+    let mut file = File::create(&dest_path).await.map_err(|e| {
+        eprintln!("Failed to create file: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    // Create decryptor
+    let mut decryptor = state.encryptor.create_stream_decryptor();
+
+    // decrypt and write to dest
+    let mut stream = body.into_data_stream();
+    let mut buffer = Vec::new();
+
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result.map_err(|e| {
+            eprintln!("Stream error: {}", e);
+            StatusCode::BAD_REQUEST
+        })?;
+
+        buffer.extend_from_slice(&chunk);
+
+        // parse framed chunks
+        while buffer.len() >= 4 {
+            let len = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
+
+            if buffer.len() < 4 + len {
+                break; // wait for more data
+            }
+
+            let encrypted_chunk = &buffer[4..4 + len];
+            let plaintext = decryptor.decrypt_next(encrypted_chunk).map_err(|e| {
+                eprintln!("Decryption failed: {:?}", e);
+                StatusCode::BAD_REQUEST
+            })?;
+
+            file.write_all(&plaintext).await.map_err(|e| {
+                eprintln!("Failed to write to file: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+
+            // reomve decrypted chunk
+            buffer.drain(..4 + len);
+        }
+    }
+
+    // ensure all data is written
+    file.flush()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    println!("Upload complete");
+
+    let response_json = format!(r#"{{"success":true,"filename":"{}"}}"#, filename);
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(Body::from(response_json))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+pub async fn serve_upload_page() -> Result<Html<&'static str>, StatusCode> {
+    // return embedded html to brower
+    const HTML: &str = include_str!("../../templates/upload/upload.html");
+    Ok(Html(HTML))
+}
+
+pub async fn serve_upload_js() -> Response {
+    const JS: &str = include_str!("../../templates/upload/upload.js");
+    Response::builder()
+        .header("content-type", "application/javascript; charset=utf-8")
+        .body(Body::from(JS))
+        .unwrap()
+}
+
+pub async fn serve_crypto_js() -> Response {
+    const JS: &str = include_str!("../../templates/shared/crypto.js");
     Response::builder()
         .header("content-type", "application/javascript; charset=utf-8")
         .body(Body::from(JS))

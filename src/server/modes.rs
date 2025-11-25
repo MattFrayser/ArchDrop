@@ -1,5 +1,6 @@
 use super::utils;
 use crate::qr;
+use crate::server::ServerDirection;
 use crate::tunnel::CloudflareTunnel;
 use axum::Router;
 use std::net::SocketAddr;
@@ -21,7 +22,10 @@ pub struct Server {
     pub file_hash: String,
 }
 
-pub async fn start_local(server: Server) -> Result<u16, Box<dyn std::error::Error>> {
+pub async fn start_local(
+    server: Server,
+    direction: ServerDirection,
+) -> Result<u16, Box<dyn std::error::Error>> {
     // local Ip and Certs
     let local_ip = utils::get_local_ip().unwrap_or_else(|| "127.0.0.1".to_string());
     let tls_config = utils::generate_cert(&local_ip).await?;
@@ -31,9 +35,14 @@ pub async fn start_local(server: Server) -> Result<u16, Box<dyn std::error::Erro
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let port = listener.local_addr()?.port();
 
+    let service = match direction {
+        ServerDirection::Send => "download",
+        ServerDirection::Recieve => "upload",
+    };
+
     let url = format!(
-        "https://{}:{}/download/{}#key={}&nonce={}",
-        local_ip, port, server.token, server.key, server.nonce
+        "https://{}:{}/{}/{}#key={}&nonce={}",
+        local_ip, port, service, server.token, server.key, server.nonce
     );
 
     let qr_code = qr::generate_qr(&url);
@@ -58,7 +67,10 @@ pub async fn start_local(server: Server) -> Result<u16, Box<dyn std::error::Erro
     Ok(port)
 }
 
-pub async fn start_http(server: Server) -> Result<u16, Box<dyn std::error::Error>> {
+pub async fn start_http(
+    server: Server,
+    direction: ServerDirection,
+) -> Result<u16, Box<dyn std::error::Error>> {
     let Server {
         app,
         token,
@@ -78,9 +90,14 @@ pub async fn start_http(server: Server) -> Result<u16, Box<dyn std::error::Error
     utils::wait_for_server_ready(port, 5).await?;
     println!("local server ready");
 
+    let service = match direction {
+        ServerDirection::Send => "download",
+        ServerDirection::Recieve => "upload",
+    };
+
     let url = format!(
-        "http://127.0.0.1:{}/download/{}#key={}&nonce={}",
-        port, token, key, nonce
+        "http://127.0.0.1:{}/{}/{}#key={}&nonce={}",
+        port, service, token, key, nonce
     );
     println!("{url}");
 
@@ -94,7 +111,10 @@ pub async fn start_http(server: Server) -> Result<u16, Box<dyn std::error::Error
     Ok(port)
 }
 
-pub async fn start_tunnel(server: Server) -> Result<u16, Box<dyn std::error::Error>> {
+pub async fn start_tunnel(
+    server: Server,
+    direction: ServerDirection,
+) -> Result<u16, Box<dyn std::error::Error>> {
     let Server {
         app,
         token,
@@ -122,9 +142,15 @@ pub async fn start_tunnel(server: Server) -> Result<u16, Box<dyn std::error::Err
     let tunnel = CloudflareTunnel::start(port).await?;
     println!("tunnel started");
 
+    let service = match direction {
+        ServerDirection::Send => "download",
+        ServerDirection::Recieve => "upload",
+    };
+
     let url = format!(
-        "{}/download/{}#key={}&nonce={}",
+        "{}/{}/{}#key={}&nonce={}",
         tunnel.url(),
+        service,
         token,
         key,
         nonce
