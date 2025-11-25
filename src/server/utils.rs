@@ -33,9 +33,14 @@ pub async fn wait_for_server_ready(
         }
     }
 }
-pub fn spawn_tui(progress: watch::Receiver<f64>, file_name: String, qr_code: String, url: String) {
+pub fn spawn_tui(
+    progress: watch::Receiver<f64>,
+    file_name: String,
+    qr_code: String,
+    is_recieving: bool,
+) {
     tokio::spawn(async move {
-        let mut ui = TransferUI::new(progress, file_name, qr_code, url);
+        let mut ui = TransferUI::new(progress, file_name, qr_code, is_recieving);
 
         if let Err(e) = ui.run().await {
             eprintln!("ui err: {}", e);
