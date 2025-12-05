@@ -1,5 +1,7 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 use crate::crypto::types::Nonce;
 use crate::errors::AppError;
@@ -16,6 +18,7 @@ use axum::{
     Json,
 };
 use reqwest::header;
+use tokio::time::sleep;
 
 #[derive(serde::Deserialize)]
 pub struct ChunkParams {
@@ -31,6 +34,11 @@ pub async fn manifest_handler(
 ) -> Result<Json<Manifest>, AppError> {
     // Session claimed when fetching manifest
     // Manifests holds info about files (sizes, names) only client should see
+    tracing::info!(
+        "Manifest request: token={}, client={}",
+        token,
+        params.client_id
+    );
     auth::claim_or_validate_session(&state.session, &token, &params.client_id)?;
 
     // Get manifest from session
@@ -50,48 +58,71 @@ pub async fn send_handler(
     // Sessions are claimed by manifest, so just check client
     let client_id = &params.client_id;
     auth::require_active_session(&state.session, &token, client_id)?;
+    tracing::debug!(
+        "Chunk request START: file={}, chunk={}, client={}",
+        file_index,
+        chunk_index,
+        client_id
+    );
+
+    // Some browser send multiple retries (safari) retries should,
+    // Be noted to not count towards total
+    let is_retry = state.session.has_chunk_been_sent(file_index, chunk_index);
+
+    // Only mark non retries as sent, keeps count accurate
+    if !is_retry {
+        state.session.mark_chunk_sent(file_index, chunk_index);
+    }
 
     let file_entry = state
         .session
         .get_file(file_index)
         .ok_or_else(|| anyhow::anyhow!("Invalid file index"))?;
 
-    // Calc chunk boundries for size of curr chunk
-    let start = chunk_index as u64 * config::CHUNK_SIZE;
-    let end = std::cmp::min(start + config::CHUNK_SIZE, file_entry.size);
+    let encrypted_chunk = process_chunk(file_entry, chunk_index, state.session.cipher()).await?;
 
-    if start >= file_entry.size {
-        return Err(anyhow::anyhow!("Chunk index out of bounds").into());
+    // 4. Update Progress (Only if this is the first time serving this chunk)
+    if !is_retry {
+        let (new_total, session_total) = state.session.increment_sent_chunk();
+        let raw_progress = (new_total as f64 / session_total as f64) * 100.0;
+
+        // Cap at 99% until explicit completion
+        let _ = state.progress_sender.send(raw_progress.min(99.0));
+    } else {
+        tracing::debug!("Served duplicate chunk {}/{}", file_index, chunk_index);
     }
-
-    let chunk_len = (end - start) as usize;
-
-    // read chunk
-    let buffer = read_chunk_blocking(file_entry.full_path.clone(), start, chunk_len)
-        .await
-        .context("Failed reading chunkdata")?;
-
-    // TUI progress updates
-    let (new_total_chunks, session_total_chunks) = state.session.increment_sent_chunk();
-    let progress = (new_total_chunks as f64 / session_total_chunks as f64) * 100.0;
-    let _ = state.progress_sender.send(progress);
-
-    // encrypt and return
-    let file_nonce = Nonce::from_base64(&file_entry.nonce)
-        .context(format!("Invalid nonce for file: {}", file_entry.name))?;
-
-    let cipher = state.session.cipher();
-
-    let encrypted =
-        crypto::encrypt_chunk_at_position(cipher, &file_nonce, &buffer, chunk_index as u32)
-            .context(format!(
-                "Failed to encrypt chunk {} of file {}",
-                chunk_index, file_entry.name
-            ))?;
 
     Ok(Response::builder()
         .header(header::CONTENT_TYPE, "application/octet-stream")
-        .body(Body::from(encrypted))?)
+        .body(Body::from(encrypted_chunk))?)
+}
+
+async fn process_chunk(
+    file_entry: &crate::transfer::manifest::FileEntry,
+    chunk_index: usize,
+    cipher: &Arc<aes_gcm::Aes256Gcm>,
+) -> Result<Vec<u8>> {
+    let start = chunk_index as u64 * config::CHUNK_SIZE;
+
+    // Validate bounds
+    if start >= file_entry.size {
+        return Err(anyhow::anyhow!(
+            "Chunk start {} exceeds file size {}",
+            start,
+            file_entry.size
+        ));
+    }
+
+    let end = std::cmp::min(start + config::CHUNK_SIZE, file_entry.size);
+    let chunk_len = (end - start) as usize;
+
+    // Read from disk
+    let buffer = read_chunk_blocking(file_entry.full_path.clone(), start, chunk_len).await?;
+
+    // Encrypt
+    let file_nonce = Nonce::from_base64(&file_entry.nonce)?;
+    crypto::encrypt_chunk_at_position(cipher, &file_nonce, &buffer, chunk_index as u32)
+        .context("Encryption failed")
 }
 
 pub async fn complete_download(
@@ -99,19 +130,68 @@ pub async fn complete_download(
     Query(params): Query<ChunkParams>,
     State(state): State<AppState>,
 ) -> Result<axum::Json<serde_json::Value>, AppError> {
+    use std::sync::atomic::Ordering;
+
     // Session must be active and owned to complete
     let client_id = &params.client_id;
+
+    // If the session is ALREADY completed, resend the success signal
+    // and return 200 OK. Handles the client retrying on network failure.
+    if state.session.complete(&token, client_id) {
+        tracing::info!("Duplicate complete request for client: {}", client_id);
+        let _ = state.progress_sender.send(100.0);
+        return Ok(axum::Json(serde_json::json!({
+           "success": true,
+           "message": "Already completed"
+        })));
+    }
+
+    let chunks_sent = state.session.chunks_sent.load(Ordering::SeqCst);
+    let total_chunks = state.session.total_chunks.load(Ordering::SeqCst);
+
+    tracing::info!(
+        "Complete download request: token={}, client={}, chunks_sent={}/{}",
+        token,
+        client_id,
+        chunks_sent,
+        total_chunks
+    );
+
     auth::require_active_session(&state.session, &token, client_id)?;
 
+    // Verify all chunks were actually sent
+    if chunks_sent < total_chunks {
+        tracing::warn!(
+            "Complete called prematurely: {}/{} chunks sent ({}% complete)",
+            chunks_sent,
+            total_chunks,
+            (chunks_sent as f64 / total_chunks as f64 * 100.0)
+        );
+    }
+
     state.session.complete(&token, client_id);
+    tracing::info!(
+        "Transfer marked complete in session state by client: {}",
+        client_id
+    );
 
-    // Set progress to 100% to signal completion and close TUI
-    let _ = state.progress_sender.send(100.0);
-
-    Ok(axum::Json(serde_json::json!({
+    // preprepare body
+    let response_body = axum::Json(serde_json::json!({
         "success": true,
-        "message": "Download complete"
-    })))
+        "message": "Download successful. Initiating server shutdown."
+    }));
+
+    // Wait until Axum response leaves to signal shutdown on 100%
+    // 50ms should be enough to ensure proper HTTP res
+    // clone progress_sender so task can run independantly of func
+    let progress_sender_clone = state.progress_sender.clone();
+    tokio::spawn(async move {
+        sleep(Duration::from_millis(50)).await;
+        eprintln!("TUI shutdown signal (100.0) sent successfully. Exiting now.");
+        let _ = progress_sender_clone.send(100.0);
+    });
+
+    Ok(response_body)
 }
 
 pub async fn get_file_hash(
@@ -170,20 +250,54 @@ async fn compute_file_hash(path: &std::path::Path) -> Result<String> {
 async fn read_chunk_blocking(path: PathBuf, start: u64, chunk_len: usize) -> Result<Vec<u8>> {
     // File reading is sync
     tokio::task::spawn_blocking(move || {
-        let mut file = std::fs::File::open(&path).context(format!(
-            "Failed to open file for sending: {}",
-            path.display()
-        ))?;
+        tracing::debug!(
+            "Blocking task START: path={:?}, start={}, len={}",
+            path,
+            start,
+            chunk_len
+        );
 
-        let mut buffer = vec![0u8; chunk_len];
+        // Catch panics to prevent lock poisoning
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut file = std::fs::File::open(&path).context(format!(
+                "Failed to open file for sending: {}",
+                path.display()
+            ))?;
 
-        // Seek to the starting position and read the chunk
-        file.seek(SeekFrom::Start(start))
-            .context("Failed to seek file")?;
-        file.read_exact(&mut buffer)
-            .context("Failed to read chunk")?;
+            let mut buffer = vec![0u8; chunk_len];
 
-        Ok(buffer)
+            // Seek to the starting position and read the chunk
+            file.seek(SeekFrom::Start(start))
+                .context("Failed to seek file")?;
+
+            tracing::debug!(
+                "Reading {} bytes from position {} in {:?}",
+                chunk_len,
+                start,
+                path
+            );
+
+            file.read_exact(&mut buffer)
+                .context("Failed to read chunk")?;
+
+            tracing::debug!("Read complete, buffer size={}", buffer.len());
+
+            Ok::<Vec<u8>, anyhow::Error>(buffer)
+        }));
+
+        match result {
+            Ok(r) => r,
+            Err(panic) => {
+                tracing::error!(
+                    "PANIC in read_chunk_blocking: {:?}, path={:?}, start={}, len={}",
+                    panic,
+                    path,
+                    start,
+                    chunk_len
+                );
+                Err(anyhow::anyhow!("Panic during file read"))
+            }
+        }
     })
     .await
     .context("File read task panicked")?
