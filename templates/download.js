@@ -35,13 +35,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
         cachedToken = window.location.pathname.split('/').pop()
         cachedClientId = getClientId()
-        const manifestResponse = await fetch(`/send/${token}/manifest?clientId=${clientId}`)
+        const manifestResponse = await fetch(`/send/${cachedToken}/manifest?clientId=${cachedClientId}`)
         if (!manifestResponse.ok) {
             throw new Error(`Failed to fetch manifest: HTTP ${manifestResponse.status}`);
         }
 
         cachedManifest = await manifestResponse.json()
-        displayFileList(manifest.files)
+        displayFileList(cachedManifest.files)
 
     } catch (error) {
         console.error('Failed to load file list:', error)
@@ -88,7 +88,6 @@ async function startDownload() {
     try {
         // Get session key form url
         const { key } = await getCredentialsFromUrl()
-        const token = window.location.pathname.split('/').pop()
 
         // download files concurrently
         await runWithConcurrency(
@@ -96,7 +95,7 @@ async function startDownload() {
             async ({ file, fileItem }) => {
                 fileItem.classList.add('downloading')
                 try {
-                    await downloadFile(token, file, key, fileItem)
+                    await downloadFile(cachedToken, file, key, fileItem)
                     fileItem.classList.remove('downloading')
                     fileItem.classList.add('completed')
                 } catch (error) {
@@ -108,7 +107,15 @@ async function startDownload() {
             MAX_CONCURRENT_FILES
         )
 
-        await fetch(`/send/${token}/complete`, { method: 'POST' })
+        await retryWithExponentialBackoff(async () => {
+            const url = `/send/${cachedToken}/complete?clientId=${cachedClientId}`;
+            
+            const response = await fetch(url, { method: 'POST' });
+            
+            if (!response.ok) {
+                throw new Error(`Completion handshake failed: ${response.status}`);
+            }
+        }, 5, 'Finalizing Transfer');
 
         const downloadBtn = document.getElementById('downloadBtn')
         downloadBtn.textContent = 'Download Complete!'
@@ -123,10 +130,6 @@ async function downloadFile(token, fileEntry, key, fileItem) {
     const nonceBase = urlSafeBase64ToUint8Array(fileEntry.nonce)
     const totalChunks = Math.ceil(fileEntry.size / CHUNK_SIZE)
 
-    // Decrypt chunks into Transform stram for total file verification
-    const decryptedStream = getDecryptedChunkStream(token, fileEntry, key, totalChunks, fileItem)
-    const hashStream = new HashingTransformStream()
-    
     if (browserCaps.hasFileSystemAccess && fileEntry.size > FILE_SYSTEM_API_THRESHOLD) {
         console.log(`Using File System API for ${fileEntry.name} (${formatFileSize(fileEntry.size)})`)
         await downloadViaFileSystemAPI(token, fileEntry, key, nonceBase, totalChunks, fileItem)
@@ -135,23 +138,68 @@ async function downloadFile(token, fileEntry, key, fileItem) {
         if (fileEntry.size > browserCaps.estimatedMemory * 0.5) {
             await showMemoryWarning(fileEntry)
         }
-        
+
         console.log(`Using in-memory download for ${fileEntry.name}`)
         await downloadViaBlob(token, fileEntry, key, nonceBase, totalChunks, fileItem)
     }
 
-    // Verify the hash after all chunks arrive
-    const computedHash = await hashStream.getComputedHash()
-    await verifyHash(computedHash, fileEntry, token)
+    // TODO: Re-implement hash verification with proper stream piping
 }
 
-// Create the stream of decrypted chunks
+// SEQUENTIAL STREAMING
+// for iOS Safari support, maybe other browsers too?
 function getDecryptedChunkStream(token, fileEntry, key, totalChunks, fileItem) {
     const nonceBase = urlSafeBase64ToUint8Array(fileEntry.nonce)
     let completedChunks = 0
 
     return new ReadableStream({
         async start(controller) {
+            try {
+                // chunks one at a time, in order
+                for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+                    const encrypted = await downloadChunk(
+                        token,
+                        fileEntry.index,
+                        chunkIndex
+                    )
+
+                    // Decrypt chunk
+                    const nonce = generateNonce(nonceBase, chunkIndex)
+                    const decrypted = await window.crypto.subtle.decrypt(
+                        { name: 'AES-GCM', iv: nonce },
+                        key,
+                        encrypted
+                    )
+
+                    // Enqueue immediately, keeps memory low 
+                    controller.enqueue(new Uint8Array(decrypted))
+
+                    // Update progress for UI 
+                    completedChunks++
+                    updateFileProgress(fileItem, completedChunks, totalChunks)
+                }
+
+                controller.close()
+            } catch (e) {
+                console.error('Error downloading file:', e)
+                controller.error(e)
+                throw e
+            }
+        },
+    })
+}
+
+/*  CONCURRENT APPROACH - Had issues with safari, but want to keep for future 
+                          Could have different brower features
+function getDecryptedChunkStream(token, fileEntry, key, totalChunks, fileItem) {
+    const nonceBase = urlSafeBase64ToUint8Array(fileEntry.nonce)
+    let completedChunks = 0
+
+    return new ReadableStream({
+        async start(controller) {
+            // Array to store chunks in order - PROBLEM: buffers entire file in memory!
+            const orderedChunks = new Array(totalChunks)
+
             // Use concurrency helper to download chunks in parallel
             await runWithConcurrency(
                 Array.from({ length: totalChunks }, (_, i) => i),
@@ -159,31 +207,38 @@ function getDecryptedChunkStream(token, fileEntry, key, totalChunks, fileItem) {
                     try {
                         const encrypted = await downloadChunk(token, fileEntry.index, chunkIndex)
                         const nonce = generateNonce(nonceBase, chunkIndex)
-                        
+
                         const decrypted = await window.crypto.subtle.decrypt(
                             { name: 'AES-GCM', iv: nonce },
                             key,
                             encrypted
                         )
-                        
-                        // Enqueue the decrypted chunk directly
-                        controller.enqueue(new Uint8Array(decrypted))
+
+                        // Store chunk in correct position instead of enqueuing immediately
+                        orderedChunks[chunkIndex] = new Uint8Array(decrypted)
 
                         completedChunks++
                         updateFileProgress(fileItem, completedChunks, totalChunks)
                     } catch (e) {
                         console.error(`Error processing chunk ${chunkIndex}:`, e)
                         // Error handling: Abort the stream on chunk failure
-                        controller.error(e) 
-                        throw e 
+                        controller.error(e)
+                        throw e
                     }
                 },
-                MAX_CONCURRENT_DOWNLOADS
+                MAX_CONCURRENT_FILES
             )
+
+            // Enqueue all chunks in correct order - PROBLEM: only starts after ALL chunks buffered
+            for (const chunk of orderedChunks) {
+                controller.enqueue(chunk)
+            }
+
             controller.close()
         },
     })
 }
+*/
 
 
 // Transform Stream for memory-efficient hash calculation
@@ -245,10 +300,13 @@ async function downloadViaFileSystemAPI(token, fileEntry, key, nonceBase, totalC
     const fileHandle = await window.showSaveFilePicker({
         suggestedName: fileEntry.name,
     })
-    
+
     const writable = await fileHandle.createWritable()
-    
+
     try {
+        // Create the decrypted stream
+        const stream = getDecryptedChunkStream(token, fileEntry, key, totalChunks, fileItem)
+
         // Pipe the verifiable stream directly to the disk writable
         await stream.pipeTo(writable)
         
@@ -264,7 +322,10 @@ async function downloadViaFileSystemAPI(token, fileEntry, key, nonceBase, totalC
 
 // In-memory blob path (Firefox/Safari/small files)
 async function downloadViaBlob(token, fileEntry, key, nonceBase, totalChunks, fileItem) {
-// Collect the stream into a Response
+    // Create the decrypted stream
+    const stream = getDecryptedChunkStream(token, fileEntry, key, totalChunks, fileItem)
+
+    // Collect the stream into a Response
     const response = new Response(stream)
     
     // Create a Blob from the Response stream
@@ -310,8 +371,8 @@ async function verifyHash(blob, fileEntry, token) {
         .map(b => b.toString(16).padStart(2,'0'))
         .join('')
 
-    // Request hash from server
-    const clientId = getClientId()
+    // Request hash from server - use cached client ID
+    const clientId = cachedClientId
     const response = await fetch(`/send/${token}/${fileEntry.index}/hash?clientId=${clientId}`)
     if (!response.ok) {
         console.warn(`Could not verify ${fileEntry.name}: ${response.status}`)
@@ -323,12 +384,11 @@ async function verifyHash(blob, fileEntry, token) {
     if (computedHash !== sha256) {
         throw new Error(`File integrity check failed! Expected ${sha256}, got ${computedHash}`)
     }
-
-    console.log(`✓ Verified ${fileEntry.name}`)
 }
 
 async function downloadChunk(token, fileIndex, chunkIndex, maxRetries = 3) {
-    const clientId = getClientId()
+    // Use cached client ID to ensure consistency across all requests
+    const clientId = cachedClientId
 
     return await retryWithExponentialBackoff(async () => {
         const response = await fetch(`/send/${token}/${fileIndex}/chunk/${chunkIndex}?clientId=${clientId}`)

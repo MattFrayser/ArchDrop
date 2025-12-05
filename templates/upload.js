@@ -144,7 +144,9 @@ async function uploadFiles(selectedFiles) {
         const token = window.location.pathname.split('/').pop()
 
         // Send manifest first so server knows total chunks
+        console.time('Manifest upload');
         await sendManifest(token, selectedFiles);
+        console.timeEnd('Manifest upload');
 
         await runWithConcurrency(
             selectedFiles.map((file, index) => ({ file, index, fileItem: fileItems[index] })),
@@ -180,55 +182,72 @@ async function uploadFiles(selectedFiles) {
 
 async function uploadFile(file, relativePath, token, key, fileItem) {
     // each file gets its own nonce
-    const fileNonce = crypto.getRandomValues(new Uint8Array(7));
+    const fileNonce = crypto.getRandomValues(new Uint8Array(8));
     const totalChunks = Math.ceil(file.size / CHUNK_SIZE)
 
     console.log(`Uploading: ${relativePath} (${totalChunks} chunks)`);
+    console.time(`${relativePath} - chunk 0`);
+    console.time(`${relativePath} - total`);
 
     // Track completed chunks for progress
     let completedChunks = 0
 
-    await runWithConcurrency(
-        Array.from({ length: totalChunks }, (_, i) => i),
-        async (chunkIndex) => {
-            const start = chunkIndex * CHUNK_SIZE
-            const end = Math.min(start + CHUNK_SIZE, file.size)
-            const chunkBlob = file.slice(start, end)
-            const chunkData = await chunkBlob.arrayBuffer()
+    // Helper function to prepare and upload a single chunk
+    const prepareAndUploadChunk = async (chunkIndex) => {
+        const start = chunkIndex * CHUNK_SIZE
+        const end = Math.min(start + CHUNK_SIZE, file.size)
+        const chunkBlob = file.slice(start, end)
+        const chunkData = await chunkBlob.arrayBuffer()
 
-            // Encrypt chunk
-            const nonce = generateNonce(fileNonce, chunkIndex)
-            const encrypted = await crypto.subtle.encrypt(
-                { name: 'AES-GCM', iv: nonce },
-                key,
-                chunkData
-            )
+        // Encrypt chunk
+        const nonce = generateNonce(fileNonce, chunkIndex)
+        const encrypted = await crypto.subtle.encrypt(
+            { name: 'AES-GCM', iv: nonce },
+            key,
+            chunkData
+        )
 
-            // Create FormData with chunk and metadata
-            const formData = new FormData()
-            formData.append('chunk', new Blob([encrypted]))
-            formData.append('relativePath', relativePath)
-            formData.append('fileName', file.name)
-            formData.append('chunkIndex', chunkIndex.toString())
-            formData.append('totalChunks', totalChunks.toString())
-            formData.append('fileSize', file.size.toString())
-            formData.append('clientId', getClientId())  // ← FIX: Add clientId to FormData
+        // Create FormData with chunk and metadata
+        const formData = new FormData()
+        formData.append('chunk', new Blob([encrypted]))
+        formData.append('relativePath', relativePath)
+        formData.append('fileName', file.name)
+        formData.append('chunkIndex', chunkIndex.toString())
+        formData.append('totalChunks', totalChunks.toString())
+        formData.append('fileSize', file.size.toString())
+        formData.append('clientId', getClientId())
 
-            if (chunkIndex === 0) {
-                const nonceBase64 = arrayBufferToBase64(fileNonce)
-                formData.append('nonce', nonceBase64)
-            }
+        if (chunkIndex === 0) {
+            const nonceBase64 = arrayBufferToBase64(fileNonce)
+            formData.append('nonce', nonceBase64)
+        }
 
-            // Upload chunk
-            await uploadChunk(token, formData, chunkIndex, relativePath)
+        // Upload chunk
+        await uploadChunk(token, formData, chunkIndex, relativePath)
 
-            // Update progress
-            completedChunks++
-            updateFileProgress(fileItem, completedChunks, totalChunks)
-        },
-        MAX_CONCURRENT
-    )    // Finalize (merge chunks)
+        // Update progress
+        completedChunks++
+        updateFileProgress(fileItem, completedChunks, totalChunks)
+    }
 
+    // PHASE 1: Upload chunk 0 first (with nonce) - ensures nonce arrives before other chunks
+    if (totalChunks > 0) {
+        await prepareAndUploadChunk(0)
+        console.timeEnd(`${relativePath} - chunk 0`);
+    }
+
+    // PHASE 2: Upload remaining chunks concurrently
+    if (totalChunks > 1) {
+        await runWithConcurrency(
+            Array.from({ length: totalChunks - 1 }, (_, i) => i + 1),
+            prepareAndUploadChunk,
+            MAX_CONCURRENT_FILES
+        )
+    }
+
+    console.timeEnd(`${relativePath} - total`);
+
+    // Finalize (merge chunks)
     await finalizeFile(token, relativePath);
 
     const progressText = fileItem.querySelector('.progress-text')
@@ -249,7 +268,6 @@ async function uploadChunk(token, formData, chunkIndex, relativePath) {
             throw new Error(`HTTP ${response.status}`)
         }
         
-        // Log success (optional, can remove for production)
         console.log(`✓ Chunk ${chunkIndex} of ${relativePath}`)
         
     }, 3, `chunk ${chunkIndex}`)

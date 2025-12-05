@@ -3,7 +3,7 @@
 //==============
 const CHUNK_SIZE = __CHUNK_SIZE__ // Run time injected from server
 const MAX_MEMORY = 100 * 1024 * 1024 // 100MB
-const MAX_CONCURRENT = 8 // Parallel chunk limit (default)
+const MAX_CONCURRENT_FILES = 8 // Parallel chunk limit (default)
 const FILE_SYSTEM_API_THRESHOLD = 100 * 1024 * 1024 // 100MB - use FileSystem API for files larger than this
 
 //============
@@ -90,15 +90,15 @@ function getClientId() {
 // Crypto
 //==============
 // Construct nonce to match Rusts EncryptorBE32
-// [7 byte base][4 byte counter][1 byte last flag]
+// [8 byte base][4 byte counter]
 function generateNonce(nonceBase64, counter) {
     const nonce = new Uint8Array(12)
-    nonce.set(nonceBase64,  0) // first 7 bytes
+    nonce.set(nonceBase64,  0) // first 8 bytes
 
 
     // last 5 bytes (4 + last flag)
     const view = new DataView(nonce.buffer)
-    view.setUint32(7, counter, false) // false = BE32
+    view.setUint32(8, counter, false) // false = BE32
 
     return nonce
 }
