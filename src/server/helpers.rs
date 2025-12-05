@@ -2,8 +2,24 @@ use crate::ui::tui::TransferUI;
 use anyhow::{Context, Result};
 use axum_server::tls_rustls::RustlsConfig;
 use rcgen::generate_simple_self_signed;
+use std::net::UdpSocket;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+
+/// Get the local IP address (non-loopback)
+pub fn get_local_ip() -> Result<String> {
+    // This doesn't actually send data, just determines the local IP
+    // Needed for --local flag
+    let socket = UdpSocket::bind("0.0.0.0:0").context("Failed to bind socket for IP detection")?;
+
+    socket
+        .connect("8.8.8.8:80")
+        .context("Failed to connect socket for IP detection")?;
+
+    let local_addr = socket.local_addr().context("Failed to get local address")?;
+
+    Ok(local_addr.ip().to_string())
+}
 
 // Poll for server ready
 pub async fn wait_for_server_ready(port: u16, timeout_secs: u64, use_https: bool) -> Result<()> {

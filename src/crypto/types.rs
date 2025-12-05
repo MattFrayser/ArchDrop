@@ -82,8 +82,8 @@ impl Nonce {
     // full nonce = base + counter
     pub fn with_counter(&self, counter: u32) -> [u8; 12] {
         let mut full_nonce = [0u8; 12];
-        full_nonce[0..8].copy_from_slice(self.as_bytes()); // 7-byte nonce base
-        full_nonce[8..11].copy_from_slice(&counter.to_be_bytes()); // 4-byte counter
+        full_nonce[0..8].copy_from_slice(&self.0); // 8-byte nonce base
+        full_nonce[8..12].copy_from_slice(&counter.to_be_bytes()); // 4-byte counter
         full_nonce
     }
 }

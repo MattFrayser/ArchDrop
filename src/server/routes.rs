@@ -4,7 +4,7 @@ use crate::{
     server::{state::AppState, static_files},
     transfer,
 };
-use axum::{routing::*, Router};
+use axum::{extract::DefaultBodyLimit, routing::*, Router};
 
 /// Create router for send mode
 pub fn create_send_router(state: &AppState) -> Router {
@@ -35,7 +35,10 @@ pub fn create_send_router(state: &AppState) -> Router {
 
 /// Create router for receive mode
 pub fn create_receive_router(state: &AppState) -> Router {
-    Router::new()
+    // Apply body limit before adding routes
+    let router = Router::new().layer(DefaultBodyLimit::max(50 * 1024 * 1024)); // 50MB for safety
+
+    router
         .route("/health", get(|| async { "OK" }))
         .route(
             "/receive/:token/manifest",
