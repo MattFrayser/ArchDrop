@@ -1,12 +1,10 @@
 //==============
 // Constants
 //==============
-const CHUNK_SIZE = 1024 * 1024 // 1MB (increased from 64KB for better throughput)
+const CHUNK_SIZE = __CHUNK_SIZE__ // Run time injected from server
 const MAX_MEMORY = 100 * 1024 * 1024 // 100MB
 const MAX_CONCURRENT = 8 // Parallel chunk limit (default)
-const MAX_CONCURRENT_DOWNLOADS = 8 // Parallel chunk download limit
-const MAX_CONCURRENT_FILES = 3 // Parallel file download limit
-const FILE_SYSTEM_API_THRESHOLD = 200 * 1024 * 1024 // 200MB - use FileSystem API for files larger than this
+const FILE_SYSTEM_API_THRESHOLD = 100 * 1024 * 1024 // 100MB - use FileSystem API for files larger than this
 
 //============
 // URL Helpers
@@ -73,6 +71,21 @@ function arrayBufferToBase64(buffer) {
     return base64
 }
 
+//===============
+// CLIENT_ID
+//==============
+const CLIENT_ID_KEY = 'archdrop_client_id';
+
+function getClientId() {
+    let clientId = localStorage.getItem(CLIENT_ID_KEY);
+
+    if (!clientId) {
+        clientId = generateUuid();
+        localStorage.setItem(CLIENT_ID_KEY, clientId);
+    }
+    return clientId;
+}
+
 //==============
 // Crypto
 //==============
@@ -90,6 +103,14 @@ function generateNonce(nonceBase64, counter) {
     return nonce
 }
 
+function generateUuid() {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+        var r = Math.random() * 16 | 0,
+            v = c == 'x' ? r : (r & 0x3 | 0x8);
+        return v.toString(16);
+    });
+}
+
 function concatArrays(...arrays) {
     const totalLength = arrays.reduce((sum, arr) => sum + arr.length, 0);
     const result = new Uint8Array(totalLength);
@@ -99,13 +120,6 @@ function concatArrays(...arrays) {
         offset += arr.length;
     }
     return result;
-}
-
-async function calculateHash(data) {
-    const hashBuffer = await crypto.subtle.digest('SHA-256', data)
-    const hashArray = Array.from(new Uint8Array(hashBuffer))
-    const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('')
-    return hashHex
 }
 
 //=============
