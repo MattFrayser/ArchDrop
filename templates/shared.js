@@ -3,7 +3,8 @@
 //==============
 const CHUNK_SIZE = __CHUNK_SIZE__ // Run time injected from server
 const MAX_MEMORY = 100 * 1024 * 1024 // 100MB
-const MAX_CONCURRENT_FILES = 8 // Parallel chunk limit (default)
+const MAX_CONCURRENT_FILES = 1 // Parallel chunk limit (default)
+const MAX_CONCURRENT_CHUNKS  = 6;
 const FILE_SYSTEM_API_THRESHOLD = 100 * 1024 * 1024 // 100MB - use FileSystem API for files larger than this
 
 //============

@@ -107,11 +107,10 @@ async function startDownload() {
             MAX_CONCURRENT_FILES
         )
 
+        // Completion
         await retryWithExponentialBackoff(async () => {
             const url = `/send/${cachedToken}/complete?clientId=${cachedClientId}`;
-            
             const response = await fetch(url, { method: 'POST' });
-            
             if (!response.ok) {
                 throw new Error(`Completion handshake failed: ${response.status}`);
             }
@@ -146,47 +145,64 @@ async function downloadFile(token, fileEntry, key, fileItem) {
     // TODO: Re-implement hash verification with proper stream piping
 }
 
-// SEQUENTIAL STREAMING
-// for iOS Safari support, maybe other browsers too?
+// Sliding Window Stram 
+// for iOS, Safari support, maybe other browsers too
 function getDecryptedChunkStream(token, fileEntry, key, totalChunks, fileItem) {
     const nonceBase = urlSafeBase64ToUint8Array(fileEntry.nonce)
-    let completedChunks = 0
+
+    let nextFetch = 0
+    let nextYield = 0
+
+    // Buffer for out of order
+    // Buffer will never have more than max (6) chunks (max 6mb), fine for memory 
+    const chunkBuffer = new Map()
+    let activeFetches = 0
+
+    // Even thought Files must arrive in correct order. Can still use concurrecy
+    // nextFext sends out up to max limit of chunkReq or room in buffer
+    // nextYield is holds results of those fetches. 
+    // Chunks are taken out of next yeild in order.
 
     return new ReadableStream({
-        async start(controller) {
-            try {
-                // chunks one at a time, in order
-                for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
-                    const encrypted = await downloadChunk(
-                        token,
-                        fileEntry.index,
-                        chunkIndex
-                    )
-
-                    // Decrypt chunk
-                    const nonce = generateNonce(nonceBase, chunkIndex)
-                    const decrypted = await window.crypto.subtle.decrypt(
-                        { name: 'AES-GCM', iv: nonce },
-                        key,
-                        encrypted
-                    )
-
-                    // Enqueue immediately, keeps memory low 
-                    controller.enqueue(new Uint8Array(decrypted))
-
-                    // Update progress for UI 
-                    completedChunks++
-                    updateFileProgress(fileItem, completedChunks, totalChunks)
+        async pull(controller) {
+            // If we have the next needed chunk in buffer, yield it immediately
+            while (chunkBuffer.has(nextYield)) {
+                const data = chunkBuffer.get(nextYield);
+                chunkBuffer.delete(nextYield); // Free memory
+                
+                controller.enqueue(data);
+                
+                nextYield++;
+                updateFileProgress(fileItem, nextYield, totalChunks);
+                
+                if (nextChunkIndexToYield >= totalChunks) {
+                    controller.close();
+                    return;
                 }
-
-                controller.close()
-            } catch (e) {
-                console.error('Error downloading file:', e)
-                controller.error(e)
-                throw e
             }
-        },
-    })
+
+            // Refill the window of active fetches
+            while (activeFetches < MAX_CONCURRENT_CHUNKS && nextFetch < totalChunks) {
+                const chunkIndex = nextFetch++;
+                activeFetches++;
+
+                // Trigger fetch (don't await here, let it run in background)
+                fetchAndDecrypt(token, fileEntry.index, chunkIndex, key, nonceBase)
+                    .then(decrypted => {
+                        chunkBuffer.set(chunkIndex, new Uint8Array(decrypted));
+                        activeFetches--;
+                    })
+                    .catch(err => {
+                        controller.error(err);
+                    });
+            }
+            
+            // stalled (waiting for specific chunk)
+            if (chunkBuffer.size > 0 && !chunkBuffer.has(nextYield)) {
+                // Wait for promise resolution above to populate the buffer.
+            }
+        }
+    });
 }
 
 /*  CONCURRENT APPROACH - Had issues with safari, but want to keep for future 

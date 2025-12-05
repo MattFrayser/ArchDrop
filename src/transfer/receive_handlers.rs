@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::config;
 use crate::crypto::types::Nonce;
 use crate::errors::AppError;
 use crate::server::auth::{self, ClientIdParam};
@@ -54,19 +55,55 @@ pub async fn receive_manifest(
     // Claim session with manifest
     auth::claim_or_validate_session(&state.session, &token, client_id)?;
 
-    // Calculate total chunks from manifest
-    let total_chunks: u64 = manifest
-        .files
-        .iter()
-        .map(|f| (f.size + crate::config::CHUNK_SIZE - 1) / crate::config::CHUNK_SIZE)
-        .sum();
+    let receive_session = state
+        .receive_sessions()
+        .ok_or_else(|| anyhow::anyhow!("Invalid Server Mode"))?;
+
+    let destination = state
+        .session
+        .destination()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Invalid session type"))?;
+
+    let mut session_total_chunks = 0;
+    // Precreate file sessions to prevent race conditions during parallel upload
+    for file in manifest.files {
+        let file_chunks = (file.size + config::CHUNK_SIZE - 1) / config::CHUNK_SIZE;
+        session_total_chunks += file_chunks;
+
+        let file_id = security::hash_path(&file.relative_path);
+
+        // If session already exists (on retry), skip creation to avoid truncating data
+        if receive_session.contains_key(&file_id) {
+            continue;
+        }
+
+        // Validate & create path
+        security::validate_path(&file.relative_path).context("Invalid file path")?;
+        let dest_path = destination.join(&file.relative_path);
+
+        // Initialize storage (creates/truncates file) safely here in serial order
+        let storage = ChunkStorage::new(dest_path)
+            .await
+            .context("Failed to create storage")?;
+
+        let new_state = FileReceiveState {
+            storage,
+            total_chunks: file_chunks as usize,
+            nonce: String::new(), // Will be populated by the first arriving chunk
+            relative_path: file.relative_path,
+            file_size: file.size,
+        };
+
+        receive_session.insert(file_id, Arc::new(Mutex::new(new_state)));
+    }
 
     // Update session with total chunks
-    state.session.set_total_chunks(total_chunks);
+    state.session.set_total_chunks(session_total_chunks);
 
     Ok(Json(json!({
         "success": true,
-        "total_chunks": total_chunks
+        "total_chunks": session_total_chunks
     })))
 }
 
@@ -89,67 +126,20 @@ pub async fn receive_handler(
     let file_id = security::hash_path(&payload.relative_path);
     let client_id = &payload.client_id;
 
-    // Sessions are claimed on first file and verified on rest
-    let is_new_file = !receive_sessions.contains_key(&file_id);
+    auth::require_active_session(&state.session, &token, client_id)?;
 
-    if is_new_file && payload.chunk_index == 0 {
-        auth::claim_or_validate_session(&state.session, &token, client_id)?;
-    } else {
-        auth::require_active_session(&state.session, &token, client_id)?;
-    }
+    // Sessions are made in manifest, so well just get
+    let file_session_mutex = receive_sessions
+        .get(&file_id)
+        .ok_or_else(|| anyhow::anyhow!("Upload session not found. Did you send the manifest?"))?
+        .clone();
 
-    // Clone the Arc<Mutex>, dropping the DashMap lock immediately
-    // Frees dashmap up for another process.
-    let file_session_mutex = if let Some(entry) = receive_sessions.get(&file_id) {
-        entry.clone()
-    } else {
-        // Create new session logic
-        let destination = state
-            .session
-            .destination()
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("Invalid session type"))?;
-
-        security::validate_path(&payload.relative_path).context("Invalid file path")?;
-        let dest_path = destination.join(&payload.relative_path);
-
-        let storage = ChunkStorage::new(dest_path)
-            .await
-            .context("Failed to create storage")?;
-
-        let new_state = FileReceiveState {
-            storage,
-            total_chunks: payload.total_chunks,
-            nonce: payload.nonce.clone().unwrap_or_default(),
-            relative_path: payload.relative_path.clone(),
-            file_size: payload.file_size,
-        };
-
-        // Wrap in Arc<Mutex>
-        let new_entry = Arc::new(Mutex::new(new_state));
-        receive_sessions.insert(file_id.clone(), new_entry.clone());
-        new_entry
-    };
-
-    // Decrypt outside of mutex lock,
-
-    // If chunk is 0, payload will have nonce
-    // (chunk 0 will always contain nonce form network)
-    let nonce_string = if let Some(n) = &payload.nonce {
-        n.clone()
-    } else {
-        // Not chunk 0, grab mutex for nonce and drop immediately
-        let guard = file_session_mutex.lock().await;
-        let n = guard.nonce.clone();
-        drop(guard);
-        n
-    };
-
+    // Decrypt outside of mutex lock
+    let nonce_string = payload.nonce.clone().ok_or_else(|| {
+        anyhow::anyhow!("Missing nonce. Client must provide nonce with every chunk.")
+    })?;
     if nonce_string.is_empty() {
-        return Err(anyhow::anyhow!(
-            "Nonce missing. Chunk 0 must be uploaded first or nonce provided."
-        )
-        .into());
+        return Err(anyhow::anyhow!("Nonce missing.").into());
     }
 
     let nonce = Nonce::from_base64(&nonce_string)?;
@@ -165,8 +155,8 @@ pub async fn receive_handler(
     // File should be locked when writing
     let mut session = file_session_mutex.lock().await;
 
-    // Update nonce in state if this was chunk 0
-    if session.nonce.is_empty() && payload.chunk_index == 0 {
+    // Update nonce in state if this was first chunk
+    if session.nonce.is_empty() {
         session.nonce = nonce_string;
     }
 
@@ -175,9 +165,6 @@ pub async fn receive_handler(
         return Ok(axum::Json(json!({
             "success": true,
             "duplicate": true,
-            "chunk": payload.chunk_index,
-            "received": session.storage.chunk_count(),
-            "total": session.total_chunks,
         })));
     }
 
@@ -188,7 +175,6 @@ pub async fn receive_handler(
 
     // Track progress
     let (chunks_processed, total_chunks) = state.session.increment_received_chunk();
-
     if total_chunks > 0 {
         let progress = (chunks_processed as f64 / total_chunks as f64) * 100.0;
         let _ = state.progress_sender.send(progress);
@@ -196,9 +182,6 @@ pub async fn receive_handler(
 
     Ok(Json(json!({
         "success": true,
-        "chunk": payload.chunk_index,
-        "total": session.total_chunks,
-        "received": session.storage.chunk_count()
     })))
 }
 pub async fn finalize_upload(
