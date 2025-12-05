@@ -106,38 +106,22 @@ async fn wait_for_url(metrics_port: u16) -> Result<String> {
     let client = reqwest::Client::new();
     let api_url = format!("http://localhost:{}/quicktunnel", metrics_port);
 
-    tokio::time::timeout(TUNNEL_URL_TIMEOUT, async {
-        let mut interval = tokio::time::interval(TUNNEL_POLL_INTERVAL);
+    let deadline = tokio::time::Instant::now() + TUNNEL_URL_TIMEOUT;
 
-        loop {
-            interval.tick().await;
-
-            match client.get(&api_url).send().await {
-                Ok(res) => {
-                    if res.status().is_success() {
-                        match res.json::<QuickTunnelResponse>().await {
-                            Ok(json) if !json.hostname.is_empty() => {
-                                return Ok(format!("https://{}", json.hostname));
-                            }
-                            Ok(_) => {
-                                debug!("Waiting for hostname from tunnel...");
-                            }
-                            Err(e) => {
-                                warn!("Failed to parse tunnel response: {}", e);
-                            }
-                        }
-                    } else {
-                        debug!("Tunnel metrics returned status: {}", res.status());
-                    }
-                }
-                Err(e) => {
-                    debug!("Tunnel not ready yet: {}", e);
+    while tokio::time::Instant::now() < deadline {
+        // silence errors here because we expect them while initializing
+        if let Ok(res) = client.get(&api_url).send().await {
+            if let Ok(json) = res.json::<QuickTunnelResponse>().await {
+                if !json.hostname.is_empty() {
+                    return Ok(format!("https://{}", json.hostname));
                 }
             }
         }
-    })
-    .await
-    .context("Timed out waiting for tunnel URL")?
+
+        tokio::time::sleep(TUNNEL_POLL_INTERVAL).await;
+    }
+
+    anyhow::bail!("Timed out waiting for tunnel URL")
 }
 
 fn get_available_port() -> Option<u16> {
