@@ -9,6 +9,10 @@ function detectBrowserCapabilities() {
         
         // Device memory in GB (Chrome-only, returns 2, 4, 8, etc.)
         deviceMemoryGB: navigator.deviceMemory || null,
+
+        // iOS
+        isIOS: /iPad|iPhone|iPod/.test(navigator.userAgent) || 
+               (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1),
         
         // Estimated available memory in bytes
         estimatedMemory: navigator.deviceMemory 
@@ -162,23 +166,32 @@ function getDecryptedChunkStream(token, fileEntry, key, totalChunks, fileItem) {
     // nextFext sends out up to max limit of chunkReq or room in buffer
     // nextYield is holds results of those fetches. 
     // Chunks are taken out of next yeild in order.
+    let pendingPullResolver = null;
 
     return new ReadableStream({
         async pull(controller) {
-            // If we have the next needed chunk in buffer, yield it immediately
-            while (chunkBuffer.has(nextYield)) {
-                const data = chunkBuffer.get(nextYield);
-                chunkBuffer.delete(nextYield); // Free memory
-                
-                controller.enqueue(data);
-                
-                nextYield++;
-                updateFileProgress(fileItem, nextYield, totalChunks);
-                
-                if (nextChunkIndexToYield >= totalChunks) {
-                    controller.close();
-                    return;
+            // Helper to push data if available
+            const tryPush = () => {
+                // If we have the next needed chunk in buffer, yield it immediately
+                while (chunkBuffer.has(nextYield)) {
+                    const data = chunkBuffer.get(nextYield);
+                    chunkBuffer.delete(nextYield);
+                    controller.enqueue(data);
+                    
+                    nextYield++;
+                    updateFileProgress(fileItem, nextYield, totalChunks);
+                    
+                    if (nextYield >= totalChunks) {
+                        return true; // Done
+                    }
                 }
+                return false;
+            };
+
+            // Try to yield what we already have
+            if (tryPush()) {
+                controller.close();
+                return;
             }
 
             // Refill the window of active fetches
@@ -191,15 +204,26 @@ function getDecryptedChunkStream(token, fileEntry, key, totalChunks, fileItem) {
                     .then(decrypted => {
                         chunkBuffer.set(chunkIndex, new Uint8Array(decrypted));
                         activeFetches--;
+
+                        // If we were waiting for this specific chunk, wake up the pull loop
+                        if (chunkIndex === nextYield && pendingPullResolver) {
+                            pendingPullResolver();
+                            pendingPullResolver = null;
+                        }
                     })
                     .catch(err => {
                         controller.error(err);
                     });
             }
             
-            // stalled (waiting for specific chunk)
-            if (chunkBuffer.size > 0 && !chunkBuffer.has(nextYield)) {
-                // Wait for promise resolution above to populate the buffer.
+            // Stalled (buffer doesn't have the *next* ordered chunk)
+            if (!chunkBuffer.has(nextYield) && activeFetches > 0) {
+                await new Promise(resolve => pendingPullResolver = resolve);
+                
+                // When we wake up, try to push again
+                if (tryPush()) {
+                    controller.close();
+                }
             }
         }
     });
@@ -377,6 +401,16 @@ async function showMemoryWarning(fileEntry) {
     }
 }
 
+async function fetchAndDecrypt(token, fileIndex, chunkIndex, key, nonceBase) {
+    const encrypted = await downloadChunk(token, fileIndex, chunkIndex);
+    const nonce = generateNonce(nonceBase, chunkIndex);
+    
+    return await window.crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: nonce },
+        key,
+        encrypted
+    );
+}
 
 async function verifyHash(blob, fileEntry, token) {
     // Compute local hash

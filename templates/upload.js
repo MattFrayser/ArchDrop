@@ -230,7 +230,7 @@ async function uploadFile(file, relativePath, token, key, fileItem) {
         await runWithConcurrency(
             chunkIndices,
             prepareAndUploadChunk,
-            MAX_CONCURRENT_FILES
+            MAX_CONCURRENT_CHUNKS
         )
     }
 
