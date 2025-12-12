@@ -140,8 +140,8 @@ async function uploadFiles(selectedFiles) {
     })
 
     try {
-        const { key } = await getCredentialsFromUrl()
-        const token = window.location.pathname.split('/').pop()
+        const { key } = await getEncryptionKeyFromUrl(['encrypt'])
+        const token = getTokenFromUrl()
 
         // Send manifest first so server knows total chunks
         console.time('Manifest upload');
