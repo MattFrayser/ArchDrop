@@ -29,7 +29,7 @@ pub struct ClientManifest {
 
 #[derive(TryFromMultipart)]
 pub struct ChunkUploadRequest {
-    #[form_data(limit = "5MB")]
+    #[form_data(limit = "10MB")]
     pub chunk: Bytes,
     #[form_data(field_name = "relativePath")]
     pub relative_path: String,
