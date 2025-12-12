@@ -2,7 +2,7 @@
 mod api;
 pub mod auth;
 mod helpers;
-mod routes;
+pub mod routes;
 mod runtime;
 mod session;
 pub mod state;
