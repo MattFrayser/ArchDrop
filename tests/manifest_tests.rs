@@ -1,14 +1,10 @@
-use archdrop::server::state::TransferConfig;
-use archdrop::transfer::manifest::Manifest;
+mod common;
+
+use common::default_config;
+use archdrop::common::TransferConfig;
+use archdrop::common::Manifest;
 use base64::Engine;
 use tempfile::TempDir;
-
-fn default_config() -> TransferConfig {
-    TransferConfig {
-        chunk_size: 10 * 1024 * 1024,
-        concurrency: 8,
-    }
-}
 
 #[tokio::test]
 async fn test_manifest_single_file() {

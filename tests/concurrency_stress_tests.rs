@@ -1,15 +1,33 @@
+//! Concurrency Stress Tests
+//!
+//! These tests validate concurrent file transfer behavior under realistic conditions.
+//! Most tests use production chunk sizes (10MB) and are marked #[ignore] due to:
+//! - High disk I/O (100-500MB per test)
+//! - Encryption overhead with large buffers
+//! - Test suite would take 2+ minutes by default
+//!
+//! Run stress tests with: cargo test -- --ignored
+//! Run all tests with: cargo test -- --include-ignored
+
+mod common;
+
+use common::{CHUNK_SIZE, CLIENT_ID, default_config, setup_temp_dir, create_cipher};
+use archdrop::common::Session;
 use aes_gcm::{Aes256Gcm, KeyInit};
 use archdrop::crypto::types::{EncryptionKey, Nonce};
-use archdrop::server::state::TransferConfig;
-use archdrop::server::{routes, AppState, Session};
-use archdrop::transfer::manifest::Manifest;
-use archdrop::transfer::storage::ChunkStorage;
+use archdrop::common::TransferConfig;
+use archdrop::server::routes;
+use archdrop::receive::ReceiveSession;
+use archdrop::receive::ReceiveAppState;
+use archdrop::send::SendSession;
+use archdrop::server::progress::ProgressTracker;
+use archdrop::common::Manifest;
+use archdrop::receive::ChunkStorage;
 use axum::{
     body::Body,
     http::{Method, Request, StatusCode},
     Router,
 };
-use http_body_util::BodyExt;
 use sha2::digest::generic_array::GenericArray;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,35 +35,23 @@ use tempfile::TempDir;
 use tokio::sync::Mutex;
 use tower::ServiceExt;
 
-//===============
-// Test Helpers
-//===============
-const CHUNK_SIZE: usize = 10 * 1024 * 1024; // 10MB
 const CHUNK_1MB: usize = 1024 * 1024;
-const CLIENT_ID: &str = "test-client-123";
 
-fn default_config() -> TransferConfig {
-    TransferConfig {
-        chunk_size: CHUNK_SIZE as u64,
-        concurrency: 8,
-    }
+fn create_test_app(output_dir: PathBuf, key: EncryptionKey) -> (Router, ReceiveSession) {
+    create_test_app_with_config(output_dir, key, default_config())
 }
 
-fn setup_temp_dir() -> TempDir {
-    TempDir::new().expect("Failed to create temp directory")
-}
-
-fn create_test_app(output_dir: PathBuf, key: EncryptionKey) -> (Router, Session) {
-    let session = Session::new_receive(output_dir, key, 0);
+fn create_test_app_with_config(
+    output_dir: PathBuf,
+    key: EncryptionKey,
+    config: TransferConfig,
+) -> (Router, ReceiveSession) {
+    let session = ReceiveSession::new(output_dir, key);
     let (progress_sender, _) = tokio::sync::watch::channel(0.0);
-    let config = default_config();
-    let state = AppState::new_receive(session.clone(), progress_sender, config);
+    let progress = ProgressTracker::new(0, progress_sender);
+    let state = ReceiveAppState::new(session.clone(), progress, config);
     let app = routes::create_receive_router(&state);
     (app, session)
-}
-
-fn create_cipher(key: &EncryptionKey) -> Aes256Gcm {
-    Aes256Gcm::new(GenericArray::from_slice(key.as_bytes()))
 }
 
 fn create_test_data(pattern: u8, size: usize) -> Vec<u8> {
@@ -135,21 +141,12 @@ fn build_finalize_request(uri: &str, relative_path: &str) -> Request<Body> {
         .expect("Failed to build finalize request")
 }
 
-async fn extract_json(response: axum::response::Response) -> serde_json::Value {
-    let body_bytes = response
-        .into_body()
-        .collect()
-        .await
-        .expect("Failed to collect body")
-        .to_bytes();
-    serde_json::from_slice(&body_bytes).expect("Failed to parse JSON")
-}
-
 //======================
 // Concurrency Stress Tests
 //======================
 
 #[tokio::test]
+#[ignore = "stress test: writes 100MB, ~15s - run with --ignored"]
 async fn test_concurrent_different_files_same_directory() {
     let temp_dir = setup_temp_dir();
     let key = EncryptionKey::new();
@@ -275,6 +272,7 @@ async fn test_concurrent_different_files_same_directory() {
 }
 
 #[tokio::test]
+#[ignore = "stress test: writes 180MB, ~20s - run with --ignored"]
 async fn test_concurrent_chunks_different_files() {
     let temp_dir = setup_temp_dir();
     let key = EncryptionKey::new();
@@ -392,6 +390,7 @@ async fn test_concurrent_chunks_different_files() {
 }
 
 #[tokio::test]
+#[ignore = "stress test: writes 3MB, ~5s - run with --ignored"]
 async fn test_race_finalize_vs_drop() {
     let temp_dir = setup_temp_dir();
     let file_path = temp_dir.path().join("race_test.bin");
@@ -414,8 +413,8 @@ async fn test_race_finalize_vs_drop() {
     }
 
     // Spawn two racing tasks
-    let storage_clone1 = Arc::clone(&storage);
-    let storage_clone2 = Arc::clone(&storage);
+    let storage_clone1 = storage.clone();
+    let storage_clone2 = storage.clone();
 
     // Task 1: Finalize after 10ms delay
     let finalize_task = tokio::spawn(async move {
@@ -451,6 +450,7 @@ async fn test_race_finalize_vs_drop() {
 }
 
 #[tokio::test]
+#[ignore = "stress test: writes 10MB, ~5s - run with --ignored"]
 async fn test_dashmap_concurrent_session_access() {
     use dashmap::DashMap;
 
@@ -472,7 +472,7 @@ async fn test_dashmap_concurrent_session_access() {
     // Spawn 10 tasks, each accessing different session
     let mut tasks = vec![];
     for i in 0..10 {
-        let sessions = Arc::clone(&sessions);
+        let sessions = sessions.clone();
         let filename = format!("file{}.bin", i);
 
         tasks.push(tokio::spawn(async move {
@@ -509,6 +509,7 @@ async fn test_dashmap_concurrent_session_access() {
 }
 
 #[tokio::test]
+#[ignore = "stress test: writes 500MB, ~60s+ - run with --ignored"]
 async fn test_concurrent_chunk_uploads_mutex_contention() {
     let temp_dir = setup_temp_dir();
     let key = EncryptionKey::new();
@@ -618,6 +619,189 @@ async fn test_concurrent_chunk_uploads_mutex_contention() {
     }
 }
 
+//======================
+// Fast Smoke Tests (always run)
+//======================
+
+/// Fast smoke test: validates concurrent file upload with small chunks
+#[tokio::test]
+async fn test_concurrent_upload_smoke() {
+    const SMALL_CHUNK: usize = 64 * 1024; // 64KB (fast)
+
+    let temp_dir = setup_temp_dir();
+    let key = EncryptionKey::new();
+    let small_config = TransferConfig {
+        chunk_size: SMALL_CHUNK as u64,
+        concurrency: 4,
+    };
+    let (app, session) = create_test_app_with_config(
+        temp_dir.path().to_path_buf(),
+        key.clone(),
+        small_config,
+    );
+
+    // 3 files, 64KB each = 192KB total (fast)
+    let mut file_entries = vec![];
+    for i in 0..3 {
+        file_entries.push(serde_json::json!({
+            "relative_path": format!("file{}.bin", i),
+            "size": SMALL_CHUNK as u64
+        }));
+    }
+
+    let manifest = serde_json::json!({ "files": file_entries });
+    let manifest_uri = format!(
+        "/receive/{}/manifest?clientId={}",
+        session.token(),
+        CLIENT_ID
+    );
+    let request = build_json_request(&manifest_uri, manifest);
+    app.clone()
+        .oneshot(request)
+        .await
+        .expect("Failed to send manifest");
+
+    // Upload all files concurrently
+    let mut tasks = vec![];
+    for file_idx in 0..3 {
+        let app = app.clone();
+        let session_token = session.token().to_string();
+        let key = key.clone();
+
+        tasks.push(tokio::spawn(async move {
+            let filename = format!("file{}.bin", file_idx);
+            let pattern = file_idx as u8;
+            let chunk_data = create_test_data(pattern, SMALL_CHUNK);
+            let nonce = Nonce::new();
+
+            let cipher = create_cipher(&key);
+            let encrypted = archdrop::crypto::encrypt_chunk_at_position(
+                &cipher,
+                &nonce,
+                &chunk_data,
+                0,
+            )
+            .expect("Failed to encrypt chunk");
+
+            let chunk_uri = format!("/receive/{}/chunk", session_token);
+            let request = build_multipart_request(
+                &chunk_uri,
+                &filename,
+                0,
+                1,
+                SMALL_CHUNK as u64,
+                &nonce.to_base64(),
+                CLIENT_ID,
+                encrypted,
+            );
+
+            app.oneshot(request).await.expect("Failed to upload chunk")
+        }));
+    }
+
+    // Wait for all uploads
+    for task in tasks {
+        let response = task.await.expect("Task panicked");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // Verify all files exist
+    for file_idx in 0..3 {
+        let filename = format!("file{}.bin", file_idx);
+        let path = temp_dir.path().join(&filename);
+        assert!(path.exists(), "File {} should exist", filename);
+    }
+}
+
+/// Fast smoke test: validates concurrent chunk upload with small data
+#[tokio::test]
+async fn test_concurrent_chunks_smoke() {
+    const SMALL_CHUNK: usize = 64 * 1024; // 64KB
+
+    let temp_dir = setup_temp_dir();
+    let key = EncryptionKey::new();
+    let small_config = TransferConfig {
+        chunk_size: SMALL_CHUNK as u64,
+        concurrency: 4,
+    };
+    let (app, session) = create_test_app_with_config(
+        temp_dir.path().to_path_buf(),
+        key.clone(),
+        small_config,
+    );
+
+    // 1 file, 4 chunks = 256KB total (fast)
+    let num_chunks = 4;
+    let file_size = (num_chunks * SMALL_CHUNK) as u64;
+
+    let manifest = serde_json::json!({
+        "files": [{
+            "relative_path": "test.bin",
+            "size": file_size
+        }]
+    });
+    let manifest_uri = format!(
+        "/receive/{}/manifest?clientId={}",
+        session.token(),
+        CLIENT_ID
+    );
+    let request = build_json_request(&manifest_uri, manifest);
+    app.clone()
+        .oneshot(request)
+        .await
+        .expect("Failed to send manifest");
+
+    // Upload all chunks concurrently
+    let mut tasks = vec![];
+    for chunk_idx in 0..num_chunks {
+        let app = app.clone();
+        let session_token = session.token().to_string();
+        let key = key.clone();
+
+        tasks.push(tokio::spawn(async move {
+            let pattern = chunk_idx as u8;
+            let chunk_data = create_test_data(pattern, SMALL_CHUNK);
+            let nonce = Nonce::new();
+
+            let cipher = create_cipher(&key);
+            let encrypted = archdrop::crypto::encrypt_chunk_at_position(
+                &cipher,
+                &nonce,
+                &chunk_data,
+                chunk_idx as u32,
+            )
+            .expect("Failed to encrypt chunk");
+
+            let chunk_uri = format!("/receive/{}/chunk", session_token);
+            let request = build_multipart_request(
+                &chunk_uri,
+                "test.bin",
+                chunk_idx,
+                num_chunks,
+                file_size,
+                &nonce.to_base64(),
+                CLIENT_ID,
+                encrypted,
+            );
+
+            app.oneshot(request).await.expect("Failed to upload chunk")
+        }));
+    }
+
+    // Wait for all
+    for task in tasks {
+        let response = task.await.expect("Task panicked");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // Verify file exists with correct size
+    let path = temp_dir.path().join("test.bin");
+    let metadata = tokio::fs::metadata(&path)
+        .await
+        .expect("Failed to get metadata");
+    assert_eq!(metadata.len(), file_size);
+}
+
 #[tokio::test]
 async fn test_concurrent_session_claim_attempts() {
     let temp_dir = setup_temp_dir();
@@ -634,7 +818,7 @@ async fn test_concurrent_session_claim_attempts() {
         .await
         .expect("Failed to create manifest");
     let total_chunks = manifest.total_chunks(config.chunk_size);
-    let session = Session::new_send(manifest, key, total_chunks);
+    let session = SendSession::new(manifest, key, total_chunks);
     let token = session.token().to_string();
 
     // 5 clients try to claim simultaneously

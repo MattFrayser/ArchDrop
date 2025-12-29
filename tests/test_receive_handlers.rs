@@ -1,7 +1,14 @@
+mod common;
+
+use common::{CHUNK_SIZE, CLIENT_ID, default_config, setup_temp_dir, create_cipher};
+use archdrop::common::Session;
 use aes_gcm::{Aes256Gcm, KeyInit};
+use archdrop::common::TransferConfig;
 use archdrop::crypto::types::{EncryptionKey, Nonce};
-use archdrop::server::state::TransferConfig;
-use archdrop::server::{routes, AppState, Session};
+use archdrop::receive::ReceiveAppState;
+use archdrop::receive::ReceiveSession;
+use archdrop::server::progress::ProgressTracker;
+use archdrop::server::routes;
 use axum::{
     body::Body,
     http::{Method, Request, StatusCode},
@@ -13,35 +20,15 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
-//===============
-// Test Helpers
-//===============
-const CHUNK_SIZE: usize = 10 * 1024 * 1024; // 10MB
-const CLIENT_ID: &str = "test-client-123";
-
-fn default_config() -> TransferConfig {
-    TransferConfig {
-        chunk_size: CHUNK_SIZE as u64,
-        concurrency: 8,
-    }
-}
-
-fn setup_temp_dir() -> TempDir {
-    TempDir::new().expect("Failed to create temp directory")
-}
-
 // Create router with state for testing
-fn create_test_app(output_dir: PathBuf, key: EncryptionKey) -> (Router, Session) {
-    let session = Session::new_receive(output_dir, key, 0);
+fn create_test_app(output_dir: PathBuf, key: EncryptionKey) -> (Router, ReceiveSession) {
+    let session = ReceiveSession::new(output_dir, key);
     let (progress_sender, _) = tokio::sync::watch::channel(0.0);
+    let progress = ProgressTracker::new(0, progress_sender);
     let config = default_config();
-    let state = AppState::new_receive(session.clone(), progress_sender, config);
+    let state = ReceiveAppState::new(session.clone(), progress, config);
     let app = routes::create_receive_router(&state);
     (app, session)
-}
-
-fn create_cipher(key: &EncryptionKey) -> Aes256Gcm {
-    Aes256Gcm::new(GenericArray::from_slice(key.as_bytes()))
 }
 
 fn create_test_data(pattern: u8, size: usize) -> Vec<u8> {
@@ -773,5 +760,161 @@ async fn test_manifest_requires_authentication() {
         response.status().is_client_error(),
         "Expected client error for missing clientId, got {}",
         response.status()
+    );
+}
+
+//=======================
+// Disk Space
+//=======================
+#[tokio::test]
+async fn test_manifest_overflow_protection() {
+    let temp_dir = setup_temp_dir();
+    let key = EncryptionKey::new();
+    let (app, session) = create_test_app(temp_dir.path().to_path_buf(), key);
+
+    // Create manifest with file sizes that would overflow u64 when summed
+    let manifest = serde_json::json!({
+        "files": [
+            {
+                "relative_path": "file1.bin",
+                "size": u64::MAX
+            },
+            {
+                "relative_path": "file2.bin",
+                "size": 1u64
+            }
+        ]
+    });
+
+    let manifest_uri = format!(
+        "/receive/{}/manifest?clientId={}",
+        session.token(),
+        CLIENT_ID
+    );
+    let request = build_json_request(&manifest_uri, manifest);
+
+    let response = app
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("Failed to send manifest");
+
+    // Should reject due to overflow with 400 Bad Request (client error)
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "Expected 400 Bad Request for invalid manifest, got {}",
+        response.status()
+    );
+}
+
+#[tokio::test]
+async fn test_manifest_accepts_small_transfer() {
+    let temp_dir = setup_temp_dir();
+    let key = EncryptionKey::new();
+    let (app, session) = create_test_app(temp_dir.path().to_path_buf(), key);
+
+    // Small transfer that will definitely fit - validates disk space check passes
+    let one_mb = 1024 * 1024;
+    let manifest = serde_json::json!({
+        "files": [
+            {
+                "relative_path": "small1.bin",
+                "size": one_mb
+            },
+            {
+                "relative_path": "small2.bin",
+                "size": one_mb
+            }
+        ]
+    });
+
+    let manifest_uri = format!(
+        "/receive/{}/manifest?clientId={}",
+        session.token(),
+        CLIENT_ID
+    );
+    let request = build_json_request(&manifest_uri, manifest);
+
+    let response = app
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("Failed to send manifest");
+
+    // Small transfers should always succeed - validates disk check works
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "Small transfer should pass disk space validation"
+    );
+}
+
+#[tokio::test]
+async fn test_manifest_rejects_on_insufficient_space() {
+    let temp_dir = setup_temp_dir();
+    let key = EncryptionKey::new();
+    let (app, session) = create_test_app(temp_dir.path().to_path_buf(), key);
+
+    // Request 1 petabyte - should fail disk space check (no test system has this)
+    let one_pb = 1024u64 * 1024 * 1024 * 1024 * 1024;
+    let manifest = serde_json::json!({
+        "files": [
+            {
+                "relative_path": "huge.bin",
+                "size": one_pb
+            }
+        ]
+    });
+
+    let manifest_uri = format!(
+        "/receive/{}/manifest?clientId={}",
+        session.token(),
+        CLIENT_ID
+    );
+    let request = build_json_request(&manifest_uri, manifest);
+
+    let response = app
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("Failed to send manifest");
+
+    // Should fail with server error due to insufficient space
+    assert!(
+        response.status().is_server_error(),
+        "1 PB transfer should be rejected due to insufficient disk space, got {}",
+        response.status()
+    );
+}
+
+#[tokio::test]
+async fn test_manifest_empty_files_list() {
+    let temp_dir = setup_temp_dir();
+    let key = EncryptionKey::new();
+    let (app, session) = create_test_app(temp_dir.path().to_path_buf(), key);
+
+    // Empty manifest should be valid (no overflow, no disk needed)
+    let manifest = serde_json::json!({
+        "files": []
+    });
+
+    let manifest_uri = format!(
+        "/receive/{}/manifest?clientId={}",
+        session.token(),
+        CLIENT_ID
+    );
+    let request = build_json_request(&manifest_uri, manifest);
+
+    let response = app
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("Failed to send manifest");
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "Empty manifest should be accepted"
     );
 }
