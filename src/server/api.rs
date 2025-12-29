@@ -1,13 +1,12 @@
-use super::{runtime, session};
+use super::runtime;
+use crate::common::{Manifest, TransferConfig};
 use crate::crypto::types::{EncryptionKey, Nonce};
-use crate::server::state::TransferConfig;
-use crate::{
-    server::{routes, AppState, Session},
-    transfer::manifest::Manifest,
-};
+use crate::receive::{ReceiveAppState, ReceiveSession};
+use crate::send::{SendAppState, SendSession};
+use crate::server::progress::ProgressTracker;
+use crate::server::routes;
 use anyhow::Result;
 use axum::Router;
-use std::fmt;
 use std::path::PathBuf;
 use tokio::sync::watch;
 
@@ -17,39 +16,17 @@ pub enum ServerMode {
     Tunnel,
 }
 
-pub enum ServerDirection {
-    Send,
-    Receive,
-}
-
-// used for formatting url ".../send/..."
-impl fmt::Display for ServerDirection {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            ServerDirection::Send => write!(f, "send"),
-            ServerDirection::Receive => write!(f, "receive"),
-        }
-    }
-}
-
 // Server configuration
 pub struct ServerInstance {
     pub app: axum::Router,
-    pub session: session::Session,
     pub display_name: String, // shown in tui
     pub progress_sender: watch::Sender<f64>,
 }
 
 impl ServerInstance {
-    pub fn new(
-        app: Router,
-        session: Session,
-        display_name: String,
-        progress_sender: watch::Sender<f64>,
-    ) -> Self {
+    pub fn new(app: Router, display_name: String, progress_sender: watch::Sender<f64>) -> Self {
         Self {
             app,
-            session,
             display_name,
             progress_sender,
         }
@@ -63,28 +40,8 @@ impl ServerInstance {
 
 pub fn get_transfer_config(mode: &ServerMode) -> TransferConfig {
     match mode {
-        ServerMode::Tunnel => TransferConfig {
-            chunk_size: 1024 * 1024,
-            concurrency: 2,
-        },
-        ServerMode::Local => TransferConfig {
-            chunk_size: 10 * 1024 * 1024,
-            concurrency: 8,
-        },
-    }
-}
-
-// Generic server helper function
-async fn start_server(
-    server: ServerInstance,
-    app_state: AppState,
-    mode: ServerMode,
-    direction: ServerDirection,
-    nonce: Nonce,
-) -> Result<u16> {
-    match mode {
-        ServerMode::Local => runtime::start_https(server, app_state, direction, nonce).await,
-        ServerMode::Tunnel => runtime::start_tunnel(server, app_state, direction, nonce).await,
+        ServerMode::Tunnel => TransferConfig::tunnel(),
+        ServerMode::Local => TransferConfig::local(),
     }
 }
 
@@ -105,15 +62,21 @@ pub async fn start_send_server(manifest: Manifest, mode: ServerMode) -> Result<u
 
     // Send specific session
     let total_chunks = manifest.total_chunks(config.chunk_size);
-    let session = session::Session::new_send(manifest.clone(), session_key, total_chunks);
+    let send_session = SendSession::new(manifest, session_key, total_chunks);
     let (progress_sender, _) = tokio::sync::watch::channel(0.0);
+    let progress_tracker = ProgressTracker::new(total_chunks, progress_sender.clone());
 
-    // App and router
-    let state = AppState::new_send(session.clone(), progress_sender.clone(), config);
-    let app = routes::create_send_router(&state);
-    let server = ServerInstance::new(app, session, display_name, progress_sender);
+    // Create typed state for router
+    let send_state = SendAppState::new(send_session.clone(), progress_tracker.clone(), config);
+    let app = routes::create_send_router(&send_state);
 
-    start_server(server, state, mode, ServerDirection::Send, nonce).await
+    let server = ServerInstance::new(app, display_name, progress_sender);
+
+    // Call runtime functions directly with typed state
+    match mode {
+        ServerMode::Local => runtime::start_https(server, send_state, nonce).await,
+        ServerMode::Tunnel => runtime::start_tunnel(server, send_state, nonce).await,
+    }
 }
 
 //----------------
@@ -133,12 +96,20 @@ pub async fn start_receive_server(destination: PathBuf, mode: ServerMode) -> Res
 
     // Receive specific session
     // Start with 0, will be updated when manifest arrives from client
-    let session = session::Session::new_receive(destination.clone(), session_key, 0);
+    let receive_session = ReceiveSession::new(destination, session_key);
     let (progress_sender, _) = tokio::sync::watch::channel(0.0);
+    let progress_tracker = ProgressTracker::new(0, progress_sender.clone()); // 0 chunks initially
 
-    let state = AppState::new_receive(session.clone(), progress_sender.clone(), config);
-    let app = routes::create_receive_router(&state);
-    let server = ServerInstance::new(app, session, display_name, progress_sender);
+    // Create typed state for router
+    let receive_state =
+        ReceiveAppState::new(receive_session.clone(), progress_tracker.clone(), config);
+    let app = routes::create_receive_router(&receive_state);
 
-    start_server(server, state, mode, ServerDirection::Receive, nonce).await
+    let server = ServerInstance::new(app, display_name, progress_sender);
+
+    // Call runtime functions directly with typed state
+    match mode {
+        ServerMode::Local => runtime::start_https(server, receive_state, nonce).await,
+        ServerMode::Tunnel => runtime::start_tunnel(server, receive_state, nonce).await,
+    }
 }
