@@ -2,5 +2,9 @@
 .vite
 
 download.log
+upload.log
 
 test_send/
+
+docs/
+
