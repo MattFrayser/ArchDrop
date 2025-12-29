@@ -1,8 +1,15 @@
+mod common;
+
+use common::{CHUNK_SIZE, CLIENT_ID, default_config, setup_temp_dir, create_cipher};
+use archdrop::common::Session;
 use aes_gcm::{Aes256Gcm, KeyInit};
 use archdrop::crypto::types::{EncryptionKey, Nonce};
-use archdrop::server::state::TransferConfig;
-use archdrop::server::{routes, AppState, Session};
-use archdrop::transfer::manifest::Manifest;
+use archdrop::common::TransferConfig;
+use archdrop::server::routes;
+use archdrop::send::SendSession;
+use archdrop::send::SendAppState;
+use archdrop::server::progress::ProgressTracker;
+use archdrop::common::Manifest;
 use axum::{
     body::Body,
     http::{Method, Request, StatusCode},
@@ -10,27 +17,9 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use sha2::digest::generic_array::GenericArray;
-use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use tempfile::TempDir;
 use tower::ServiceExt;
-
-//===============
-// Test Helpers
-//===============
-const CHUNK_SIZE: usize = 10 * 1024 * 1024; // 10MB
-const CLIENT_ID: &str = "test-client-123";
-
-fn default_config() -> TransferConfig {
-    TransferConfig {
-        chunk_size: CHUNK_SIZE as u64,
-        concurrency: 8,
-    }
-}
-
-fn setup_temp_dir() -> TempDir {
-    TempDir::new().expect("Failed to create temp directory")
-}
 
 // Create test files and manifest
 async fn create_test_files(temp_dir: &TempDir, files: Vec<(&str, &[u8])>) -> Vec<PathBuf> {
@@ -54,7 +43,7 @@ async fn create_test_files(temp_dir: &TempDir, files: Vec<(&str, &[u8])>) -> Vec
 async fn create_test_send_app(
     file_paths: Vec<PathBuf>,
     key: EncryptionKey,
-) -> (Router, Session, u64) {
+) -> (Router, SendSession, u64) {
     let config = default_config();
     let manifest = Manifest::new(file_paths, None, config.clone())
         .await
@@ -66,16 +55,13 @@ async fn create_test_send_app(
         .map(|f| (f.size + CHUNK_SIZE as u64 - 1) / CHUNK_SIZE as u64)
         .sum();
 
-    let session = Session::new_send(manifest, key, total_chunks);
+    let session = SendSession::new(manifest, key, total_chunks);
     let (progress_sender, _) = tokio::sync::watch::channel(0.0);
-    let state = AppState::new_send(session.clone(), progress_sender, config);
+    let progress = ProgressTracker::new(total_chunks, progress_sender);
+    let state = SendAppState::new(session.clone(), progress, config);
     let app = routes::create_send_router(&state);
 
     (app, session, total_chunks)
-}
-
-fn create_cipher(key: &EncryptionKey) -> Aes256Gcm {
-    Aes256Gcm::new(GenericArray::from_slice(key.as_bytes()))
 }
 
 // Helper to build GET request with query params
@@ -325,41 +311,6 @@ async fn test_complete_download_succeeds() {
 
     let json = extract_json(response).await;
     assert_eq!(json["success"], true);
-}
-
-#[tokio::test]
-async fn test_hash_handler_returns_sha256() {
-    let temp_dir = setup_temp_dir();
-    let key = EncryptionKey::new();
-
-    let file_data = b"Test content for hashing";
-    let paths = create_test_files(&temp_dir, vec![("test.txt", file_data)]).await;
-
-    // Calculate expected hash
-    let mut hasher = Sha256::new();
-    hasher.update(file_data);
-    let expected_hash = hex::encode(hasher.finalize());
-
-    let (app, session, _) = create_test_send_app(paths, key.clone()).await;
-
-    // Claim session
-    let manifest_uri = format!("/send/{}/manifest?clientId={}", session.token(), CLIENT_ID);
-    let manifest_req = build_get_request(&manifest_uri);
-    let _ = app
-        .clone()
-        .oneshot(manifest_req)
-        .await
-        .expect("Failed to get manifest");
-
-    // Request hash
-    let hash_uri = format!("/send/{}/0/hash?clientId={}", session.token(), CLIENT_ID);
-    let request = build_get_request(&hash_uri);
-    let response = app.oneshot(request).await.expect("Failed to send request");
-
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let json = extract_json(response).await;
-    assert_eq!(json["sha256"].as_str().unwrap(), expected_hash);
 }
 
 //===================

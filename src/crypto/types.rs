@@ -5,9 +5,7 @@ use rand::RngCore;
 // OSRng pulls from Operating system
 // It is more cryptographically secure than PRNG, but slower
 
-//---------------------------------------
-// AES-256-GCM encryption key (32 bytes)
-//---------------------------------------
+/// AES-256-GCM encryption key (32 bytes)
 #[derive(Debug, Clone)]
 pub struct EncryptionKey([u8; 32]);
 
@@ -44,15 +42,13 @@ impl Default for EncryptionKey {
     }
 }
 
-//---------------------------------------------------------------------
-// 8-byte nonce base for AES-GCM stream encryption
-// Combined with a 4-byte counter to form 12-byte nonce
-//---------------------------------------------------------------------
+/// 8-byte base + 4-byte counter (chunk index) for positioned encryption.
+///
+/// Full nonce = [8-byte random | 4-byte counter]. Enables out-of-order decryption.
 #[derive(Debug, Clone)]
 pub struct Nonce([u8; 8]);
 
 impl Nonce {
-    // Create new random nonce
     pub fn new() -> Self {
         let mut nonce = [0u8; 8];
         OsRng.fill_bytes(&mut nonce);
@@ -79,7 +75,7 @@ impl Nonce {
         Ok(Self(nonce))
     }
 
-    // full nonce = base + counter
+    /// Returns 12-byte nonce: [8-byte base | 4-byte big-endian counter].
     pub fn with_counter(&self, counter: u32) -> [u8; 12] {
         let mut full_nonce = [0u8; 12];
         full_nonce[0..8].copy_from_slice(&self.0); // 8-byte nonce base

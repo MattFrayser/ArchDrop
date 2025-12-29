@@ -1,10 +1,11 @@
+use super::TransferConfig;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-use crate::{crypto::types::Nonce, server::state::TransferConfig, transfer::security};
+use crate::{crypto::types::Nonce, utils::security};
 
-// Metadata for single file
+/// Metadata for a single file during transfer
 #[derive(Serialize, Deserialize, Clone)]
 pub struct FileEntry {
     pub index: usize,
@@ -16,7 +17,7 @@ pub struct FileEntry {
     pub nonce: String,
 }
 
-// List of all files
+/// Contains all files to be transfered & config
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Manifest {
     pub files: Vec<FileEntry>,

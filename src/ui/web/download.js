@@ -17,7 +17,7 @@ const BROWSER_PROFILES = [
         check: (ua) => /iPad|iPhone|iPod/.test(ua) || (ua.includes("Mac") && navigator.maxTouchPoints > 1),
         config: {
             strategy: 'BLOB',
-            maxSize: 1024 * 1024 * 1024 // 1 GB Hard Limit
+            maxSize: 500 * 1024 * 1024 // 500 MB - safe limit for blob memory
         }
     },
     {
@@ -26,7 +26,7 @@ const BROWSER_PROFILES = [
         check: (ua) => /^((?!chrome|android).)*safari/i.test(ua),
         config: {
             strategy: 'BLOB',
-            maxSize: 3 * 1024 * 1024 * 1024 // 3 GB
+            maxSize: 500 * 1024 * 1024 // 500 MB - safe limit for blob memory
         }
     },
     {
@@ -35,7 +35,7 @@ const BROWSER_PROFILES = [
         check: (ua) => /Firefox/i.test(ua),
         config: {
             strategy: 'BLOB',
-            maxSize: 2.5 * 1024 * 1024 * 1024 // 2.5 GB (0.5 buffer)
+            maxSize: 500 * 1024 * 1024 // 500 MB - safe limit for blob memory
         }
     },
     {
@@ -44,7 +44,7 @@ const BROWSER_PROFILES = [
         check: () => true, // Always matches
         config: {
             strategy: 'BLOB',
-            maxSize: 2 * 1024 * 1024 * 1024 // 2 GB safe default
+            maxSize: 500 * 1024 * 1024 // 500 MB - safe limit for blob memory
         }
     }
 ]

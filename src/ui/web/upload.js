@@ -110,6 +110,7 @@ async function sendManifest(token, files) {
 
     const clientId = getClientId();
     const url = `/receive/${token}/manifest?clientId=${clientId}`;
+    console.log('Sending manifest:', { token, clientId, fileCount: files.length, url });
     const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -117,7 +118,17 @@ async function sendManifest(token, files) {
     });
 
     if (!response.ok) {
-        throw new Error('Failed to send manifest');
+        let errorMsg = 'Failed to send manifest';
+        try {
+            const errorData = await response.json();
+            if (errorData.error && errorData.error.message) {
+                errorMsg = errorData.error.message;
+            }
+        } catch (e) {
+            // If parsing fails, use status text
+            errorMsg = `Failed to send manifest: ${response.status} ${response.statusText}`;
+        }
+        throw new Error(errorMsg);
     }
 
     return await response.json();
@@ -217,8 +228,6 @@ async function uploadFile(file, relativePath, token, key, fileItem, config) {
         formData.append('relativePath', relativePath)
         formData.append('fileName', file.name)
         formData.append('chunkIndex', chunkIndex.toString())
-        formData.append('totalChunks', totalChunks.toString())
-        formData.append('fileSize', file.size.toString())
         formData.append('clientId', getClientId())
         formData.append('nonce', nonceBase64)
 
@@ -250,7 +259,9 @@ async function uploadChunk(token, formData, chunkIndex, relativePath) {
 
     return await retryWithExponentialBackoff(async () => {
         const controller = new AbortController()
-        const timeout = setTimeout(() => controller.abort(), 30000)
+        const timeoutDuration = 30000
+        const startTime = performance.now()
+        const timeout = setTimeout(() => controller.abort(), timeoutDuration)
 
         try {
             const response = await fetch(url, {
@@ -269,7 +280,8 @@ async function uploadChunk(token, formData, chunkIndex, relativePath) {
         } catch (error) {
             clearTimeout(timeout)
             if (error.name === 'AbortError') {
-                throw new Error(`Upload timeout after 30s`)
+                const elapsed = ((performance.now() - startTime) / 1000).toFixed(1)
+                throw new Error(`Upload aborted after ${elapsed}s (timeout: ${timeoutDuration/1000}s)`)
             }
             throw error
         }

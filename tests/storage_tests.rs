@@ -1,4 +1,7 @@
-use archdrop::transfer::storage::ChunkStorage;
+mod common;
+
+use common::setup_temp_dir;
+use archdrop::receive::ChunkStorage;
 use tempfile::TempDir;
 
 //===============
@@ -6,10 +9,6 @@ use tempfile::TempDir;
 //===============
 const CHUNK_1MB: usize = 1024 * 1024;
 const CHUNK_3MB: u64 = 3 * 1024 * 1024;
-
-fn setup_temp_dir() -> TempDir {
-    TempDir::new().expect("Failed to create temp directory")
-}
 
 fn create_chunk_data(pattern: u8, size_mb: usize) -> Vec<u8> {
     vec![pattern; size_mb * CHUNK_1MB]
@@ -186,6 +185,34 @@ async fn test_collision_preserves_extension() {
     assert_eq!(actual_name, "archive (1).tar.gz");
 }
 
+#[tokio::test]
+async fn test_collision_with_hidden_file() {
+    let temp_dir = setup_temp_dir();
+    let file_path = temp_dir.path().join(".gitignore");
+
+    // Create existing hidden file
+    tokio::fs::write(&file_path, b"existing")
+        .await
+        .expect("Failed to write test file");
+
+    // Try to create new storage with same hidden filename
+    let storage = ChunkStorage::new(file_path.clone(), 1024, 512)
+        .await
+        .expect("Failed to create ChunkStorage");
+
+    // Should create ".gitignore (1)" NOT " (1).gitignore"
+    let actual_name = storage
+        .get_path()
+        .file_name()
+        .expect("Failed to get filename")
+        .to_str()
+        .expect("Filename should be valid UTF-8");
+    assert_eq!(actual_name, ".gitignore (1)");
+
+    // Ensure no leading space (the bug we fixed)
+    assert!(!actual_name.starts_with(' '), "Filename should not start with space");
+}
+
 //==============
 // RAII Cleanup
 //==============
@@ -290,7 +317,7 @@ async fn test_concurrent_chunk_writes() {
     // Spawn 6 tasks writing different chunks concurrently
     let mut tasks = vec![];
     for chunk_idx in 0..num_chunks {
-        let storage = Arc::clone(&storage);
+        let storage = storage.clone();
 
         tasks.push(tokio::spawn(async move {
             // Each chunk has distinct pattern for verification

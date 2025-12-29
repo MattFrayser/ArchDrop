@@ -23,27 +23,27 @@ fn serve_css(content: &'static str) -> Response<Body> {
 
 //-- UPLOAD PAGE
 pub async fn serve_upload_page() -> Result<Html<&'static str>, StatusCode> {
-    serve_html(include_str!("../../templates/upload.html"))
+    serve_html(include_str!("upload.html"))
 }
 
 pub async fn serve_upload_js() -> Response<Body> {
-    serve_js(include_str!("../../templates/upload.js"))
+    serve_js(include_str!("upload.js"))
 }
 
 //-- DOWNLOAD_PAGE
 pub async fn serve_download_page() -> Result<Html<&'static str>, StatusCode> {
-    serve_html(include_str!("../../templates/download.html"))
+    serve_html(include_str!("download.html"))
 }
 
 pub async fn serve_download_js() -> Response<Body> {
-    serve_js(include_str!("../../templates/download.js"))
+    serve_js(include_str!("download.js"))
 }
 
 //-- SHARED JS AND CSS
 pub async fn serve_shared_js() -> Response<Body> {
-    serve_js(include_str!("../../templates/shared.js"))
+    serve_js(include_str!("shared.js"))
 }
 
 pub async fn serve_shared_css() -> impl axum::response::IntoResponse {
-    serve_css(include_str!("../../templates/styles.css"))
+    serve_css(include_str!("styles.css"))
 }

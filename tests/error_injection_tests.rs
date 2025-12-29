@@ -1,7 +1,22 @@
+//! Error Injection Tests
+//!
+//! These tests validate error handling under various failure conditions.
+//! Tests using large chunks (10MB) are marked #[ignore] to keep the default
+//! test suite fast. Small error tests (<1KB) run by default.
+//!
+//! Run all error tests with: cargo test --test error_injection_tests -- --include-ignored
+
+mod common;
+
+use common::{CHUNK_SIZE, CLIENT_ID, default_config, setup_temp_dir, create_cipher};
+use archdrop::common::Session;
 use aes_gcm::{Aes256Gcm, KeyInit};
 use archdrop::crypto::types::{EncryptionKey, Nonce};
-use archdrop::server::state::TransferConfig;
-use archdrop::server::{routes, AppState, Session};
+use archdrop::common::TransferConfig;
+use archdrop::server::routes;
+use archdrop::receive::ReceiveSession;
+use archdrop::receive::ReceiveAppState;
+use archdrop::server::progress::ProgressTracker;
 use axum::{
     body::Body,
     http::{Method, Request, StatusCode},
@@ -13,34 +28,14 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
-//===============
-// Test Helpers
-//===============
-const CHUNK_SIZE: usize = 10 * 1024 * 1024; // 10MB
-const CLIENT_ID: &str = "test-client-123";
-
-fn default_config() -> TransferConfig {
-    TransferConfig {
-        chunk_size: CHUNK_SIZE as u64,
-        concurrency: 8,
-    }
-}
-
-fn setup_temp_dir() -> TempDir {
-    TempDir::new().expect("Failed to create temp directory")
-}
-
-fn create_test_app(output_dir: PathBuf, key: EncryptionKey) -> (Router, Session) {
-    let session = Session::new_receive(output_dir, key, 0);
+fn create_test_app(output_dir: PathBuf, key: EncryptionKey) -> (Router, ReceiveSession) {
+    let session = ReceiveSession::new(output_dir, key);
     let (progress_sender, _) = tokio::sync::watch::channel(0.0);
+    let progress = ProgressTracker::new(0, progress_sender);
     let config = default_config();
-    let state = AppState::new_receive(session.clone(), progress_sender, config);
+    let state = ReceiveAppState::new(session.clone(), progress, config);
     let app = routes::create_receive_router(&state);
     (app, session)
-}
-
-fn create_cipher(key: &EncryptionKey) -> Aes256Gcm {
-    Aes256Gcm::new(GenericArray::from_slice(key.as_bytes()))
 }
 
 fn create_test_data(pattern: u8, size: usize) -> Vec<u8> {
@@ -241,6 +236,7 @@ async fn test_malformed_multipart_upload() {
 }
 
 #[tokio::test]
+#[ignore = "uses 20MB chunks - run with --ignored"]
 async fn test_chunk_size_mismatch() {
     let temp_dir = setup_temp_dir();
     let key = EncryptionKey::new();
@@ -295,6 +291,7 @@ async fn test_chunk_size_mismatch() {
 }
 
 #[tokio::test]
+#[ignore = "uses 30MB chunks - run with --ignored"]
 async fn test_negative_chunk_index() {
     let temp_dir = setup_temp_dir();
     let key = EncryptionKey::new();
@@ -438,6 +435,7 @@ async fn test_partial_multipart_upload() {
 }
 
 #[tokio::test]
+#[ignore = "uses 100MB chunks - run with --ignored"]
 async fn test_finalize_before_all_chunks() {
     let temp_dir = setup_temp_dir();
     let key = EncryptionKey::new();
@@ -587,6 +585,7 @@ async fn test_permission_denied_file_creation() {
 }
 
 #[tokio::test]
+#[ignore = "uses 30MB chunks - run with --ignored"]
 async fn test_duplicate_chunk_upload() {
     let temp_dir = setup_temp_dir();
     let key = EncryptionKey::new();

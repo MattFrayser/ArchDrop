@@ -1,7 +1,6 @@
 //==============
 // Constants
 //==============
-const MAX_MEMORY = 100 * 1024 * 1024 // 100MB
 const DEFAULT_CONCURRENT = 4
 
 //============
@@ -104,16 +103,22 @@ function generateNonce(nonceBase64, counter) {
 }
 
 function generateUuid() {
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-        var r = Math.random() * 16 | 0,
-            v = c == 'x' ? r : (r & 0x3 | 0x8);
-        return v.toString(16);
-    });
+    // Use cryptographically secure UUID generation
+    return crypto.randomUUID();
 }
 
 //=============
 // UI
 //=============
+
+// Helper: Create SVG element
+function createSvgElement(tagName, attributes = {}) {
+    const elem = document.createElementNS('http://www.w3.org/2000/svg', tagName)
+    for (const [key, value] of Object.entries(attributes)) {
+        elem.setAttribute(key, value)
+    }
+    return elem
+}
 
 // Create file item element with optional remove button
 function createFileItem(file, index, options = {}) {
@@ -133,12 +138,19 @@ function createFileItem(file, index, options = {}) {
     // File icon
     const icon = document.createElement('div')
     icon.className = 'file-icon'
-    icon.innerHTML = `
-        <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path>
-            <polyline points="13 2 13 9 20 9"></polyline>
-        </svg>
-    `
+
+    const iconSvg = createSvgElement('svg', {
+        'viewBox': '0 0 24 24',
+        'stroke-linecap': 'round',
+        'stroke-linejoin': 'round'
+    })
+    iconSvg.appendChild(createSvgElement('path', {
+        'd': 'M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z'
+    }))
+    iconSvg.appendChild(createSvgElement('polyline', {
+        'points': '13 2 13 9 20 9'
+    }))
+    icon.appendChild(iconSvg)
 
     // File details container
     const details = document.createElement('div')
@@ -157,12 +169,19 @@ function createFileItem(file, index, options = {}) {
     // Progress bar
     const progress = document.createElement('div')
     progress.className = 'file-progress'
-    progress.innerHTML = `
-        <div class="progress-bar-container">
-            <div class="progress-bar"></div>
-        </div>
-        <div class="progress-text">${initialProgressText}</div>
-    `
+
+    const progressBarContainer = document.createElement('div')
+    progressBarContainer.className = 'progress-bar-container'
+    const progressBar = document.createElement('div')
+    progressBar.className = 'progress-bar'
+    progressBarContainer.appendChild(progressBar)
+
+    const progressText = document.createElement('div')
+    progressText.className = 'progress-text'
+    progressText.textContent = initialProgressText
+
+    progress.appendChild(progressBarContainer)
+    progress.appendChild(progressText)
 
     // Assemble details based on layout preference
     if (useSummaryWrapper) {
@@ -187,12 +206,20 @@ function createFileItem(file, index, options = {}) {
         const removeBtn = document.createElement('button')
         removeBtn.className = 'remove-file-btn'
         removeBtn.type = 'button'
-        removeBtn.innerHTML = `
-            <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">
-                <line x1="18" y1="6" x2="6" y2="18"></line>
-                <line x1="6" y1="6" x2="18" y2="18"></line>
-            </svg>
-        `
+
+        const removeSvg = createSvgElement('svg', {
+            'viewBox': '0 0 24 24',
+            'stroke-linecap': 'round',
+            'stroke-linejoin': 'round'
+        })
+        removeSvg.appendChild(createSvgElement('line', {
+            'x1': '18', 'y1': '6', 'x2': '6', 'y2': '18'
+        }))
+        removeSvg.appendChild(createSvgElement('line', {
+            'x1': '6', 'y1': '6', 'x2': '18', 'y2': '18'
+        }))
+        removeBtn.appendChild(removeSvg)
+
         removeBtn.addEventListener('click', () => onRemove(index))
         item.appendChild(removeBtn)
     }

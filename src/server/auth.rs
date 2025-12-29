@@ -1,5 +1,4 @@
-use crate::errors::AppError;
-use crate::server::session::Session;
+use crate::common::{session_trait::Session, AppError};
 
 #[derive(serde::Deserialize)]
 pub struct ClientIdParam {
@@ -9,36 +8,24 @@ pub struct ClientIdParam {
 
 // Used for handlers that should only work with already claimed sessions
 pub fn require_active_session(
-    session: &Session,
+    session: &impl Session,
     token: &str,
     client_id: &str,
 ) -> Result<(), AppError> {
-    // Reject empty client_id
-    if client_id.trim().is_empty() {
-        return Err(anyhow::anyhow!("Client ID cannot be empty").into());
-    }
-
     if !session.is_active(token, client_id) {
-        return Err(anyhow::anyhow!("Invalid or inactive session").into());
+        return Err(AppError::Unauthorized("session not active".to_string()));
     }
     Ok(())
 }
 
 // Used for handlers that initiate transfer
 pub fn claim_or_validate_session(
-    session: &Session,
+    session: &impl Session,
     token: &str,
     client_id: &str,
 ) -> Result<(), AppError> {
-    // Reject empty client_id
-    if client_id.trim().is_empty() {
-        return Err(anyhow::anyhow!("Client ID cannot be empty").into());
-    }
-
     if !session.claim(token, client_id) {
-        return Err(
-            anyhow::anyhow!("Invalid token or session already claimed by another client").into(),
-        );
+        return Err(AppError::Unauthorized("claim session failed".to_string()));
     }
     Ok(())
 }
@@ -46,14 +33,14 @@ pub fn claim_or_validate_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::session_core::SessionImpl;
     use crate::crypto::types::EncryptionKey;
-    use std::path::PathBuf;
 
     #[test]
     fn test_require_active_unclaimed_session() {
         // Create an unclaimed session
         let key = EncryptionKey::new();
-        let session = Session::new_receive(PathBuf::from("/tmp/test"), key, 0);
+        let session = SessionImpl::new(key);
         let token = session.token();
 
         // Attempt to require active session without claiming first
@@ -67,7 +54,7 @@ mod tests {
     fn test_require_active_wrong_client_id() {
         // Create session and claim with client A
         let key = EncryptionKey::new();
-        let session = Session::new_receive(PathBuf::from("/tmp/test"), key, 0);
+        let session = SessionImpl::new(key);
         let token = session.token();
         assert!(session.claim(token, "client_a"));
 
@@ -82,7 +69,7 @@ mod tests {
     fn test_require_active_valid_session() {
         // Create session and claim with client A
         let key = EncryptionKey::new();
-        let session = Session::new_receive(PathBuf::from("/tmp/test"), key, 0);
+        let session = SessionImpl::new(key);
         let token = session.token();
         assert!(session.claim(token, "client_a"));
 
@@ -95,7 +82,7 @@ mod tests {
     fn test_claim_or_validate_idempotent() {
         // Create session
         let key = EncryptionKey::new();
-        let session = Session::new_receive(PathBuf::from("/tmp/test"), key, 0);
+        let session = SessionImpl::new(key);
         let token = session.token();
 
         // First claim should succeed
@@ -111,7 +98,7 @@ mod tests {
     fn test_claim_or_validate_different_client() {
         // Create session and claim with client A
         let key = EncryptionKey::new();
-        let session = Session::new_receive(PathBuf::from("/tmp/test"), key, 0);
+        let session = SessionImpl::new(key);
         let token = session.token();
 
         // Client A claims successfully
@@ -127,7 +114,7 @@ mod tests {
     fn test_invalid_token_format() {
         // Create session with valid token
         let key = EncryptionKey::new();
-        let session = Session::new_receive(PathBuf::from("/tmp/test"), key, 0);
+        let session = SessionImpl::new(key);
 
         // Try to claim with wrong token
         let result = claim_or_validate_session(&session, "invalid-token-12345", "client_a");
@@ -140,7 +127,7 @@ mod tests {
     fn test_empty_client_id() {
         // Create session
         let key = EncryptionKey::new();
-        let session = Session::new_receive(PathBuf::from("/tmp/test"), key, 0);
+        let session = SessionImpl::new(key);
         let token = session.token();
 
         // Empty client_id should be rejected
@@ -149,14 +136,17 @@ mod tests {
 
         // Whitespace-only should also be rejected
         let result2 = claim_or_validate_session(&session, token, "   ");
-        assert!(result2.is_err(), "Whitespace-only client_id should be rejected");
+        assert!(
+            result2.is_err(),
+            "Whitespace-only client_id should be rejected"
+        );
     }
 
     #[test]
     fn test_require_active_with_wrong_token() {
         // Create and claim session
         let key = EncryptionKey::new();
-        let session = Session::new_receive(PathBuf::from("/tmp/test"), key, 0);
+        let session = SessionImpl::new(key);
         let token = session.token();
         assert!(session.claim(token, "client_a"));
 

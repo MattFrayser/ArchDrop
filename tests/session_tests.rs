@@ -1,15 +1,13 @@
-use archdrop::server::state::TransferConfig;
-use archdrop::server::Session;
-use archdrop::transfer::manifest::Manifest;
+mod common;
+
+use common::default_config;
+use archdrop::common::Session;
+use archdrop::common::TransferConfig;
+use archdrop::send::SendSession;
+use archdrop::receive::ReceiveSession;
+use archdrop::common::Manifest;
 use archdrop::crypto::types::EncryptionKey;
 use tempfile::TempDir;
-
-fn default_config() -> TransferConfig {
-    TransferConfig {
-        chunk_size: 10 * 1024 * 1024,
-        concurrency: 8,
-    }
-}
 
 #[tokio::test]
 async fn test_send_session_creation() {
@@ -22,13 +20,13 @@ async fn test_send_session_creation() {
     let key = EncryptionKey::new();
     let total_chunks = manifest.total_chunks(config.chunk_size);
 
-    let session = Session::new_send(manifest, key, total_chunks);
+    let session = SendSession::new(manifest, key, total_chunks);
     let token = session.token().to_string();
 
     assert!(!token.is_empty(), "Token should not be empty");
 
-    // manifest() returns Option<&Arc<Manifest>>
-    let manifest = session.manifest().expect("Should have manifest");
+    // manifest() returns &Manifest (not Option)
+    let manifest = session.manifest();
     assert!(!manifest.files.is_empty(), "Should have files in manifest");
 }
 
@@ -38,16 +36,13 @@ async fn test_receive_session_creation() {
     let dest_path = temp_dir.path().to_path_buf();
     let key = EncryptionKey::new();
 
-    let session = Session::new_receive(dest_path.clone(), key, 0);
+    let session = ReceiveSession::new(dest_path.clone(), key);
     let token = session.token().to_string();
 
     assert!(!token.is_empty(), "Token should not be empty");
 
-    // destination() returns Option<&PathBuf>
-    assert_eq!(
-        session.destination().expect("Should have destination"),
-        &dest_path
-    );
+    // destination() returns &PathBuf (not Option)
+    assert_eq!(session.destination(), &dest_path);
 }
 
 #[tokio::test]
@@ -56,7 +51,7 @@ async fn test_session_claim_valid_token() {
     let dest_path = temp_dir.path().to_path_buf();
     let key = EncryptionKey::new();
 
-    let session = Session::new_receive(dest_path, key, 0);
+    let session = ReceiveSession::new(dest_path, key);
     let token = session.token();
     let client_id = "test-client-123";
 
@@ -85,7 +80,7 @@ async fn test_session_claim_invalid_token() {
     let dest_path = temp_dir.path().to_path_buf();
     let key = EncryptionKey::new();
 
-    let session = Session::new_receive(dest_path, key, 0);
+    let session = ReceiveSession::new(dest_path, key);
     let client_id = "test-client-123";
 
     // Wrong token should fail
@@ -101,7 +96,7 @@ async fn test_session_is_active() {
     let dest_path = temp_dir.path().to_path_buf();
     let key = EncryptionKey::new();
 
-    let session = Session::new_receive(dest_path, key, 0);
+    let session = ReceiveSession::new(dest_path, key);
     let token = session.token();
     let client_id = "test-client-123";
 
@@ -133,7 +128,7 @@ async fn test_session_complete() {
     let dest_path = temp_dir.path().to_path_buf();
     let key = EncryptionKey::new();
 
-    let session = Session::new_receive(dest_path, key, 0);
+    let session = ReceiveSession::new(dest_path, key);
     let token = session.token();
     let client_id = "test-client-123";
 
@@ -169,7 +164,7 @@ async fn test_send_session_get_file() {
     let key = EncryptionKey::new();
     let total_chunks = manifest.total_chunks(config.chunk_size);
 
-    let session = Session::new_send(manifest, key, total_chunks);
+    let session = SendSession::new(manifest, key, total_chunks);
 
     // Get files by index
     let file0 = session.get_file(0).expect("Should get file 0");
@@ -185,27 +180,35 @@ async fn test_send_session_get_file() {
 }
 
 #[tokio::test]
-async fn test_session_modes() {
+async fn test_send_session_has_manifest() {
     let temp_dir = TempDir::new().unwrap();
     let test_file = temp_dir.path().join("test.txt");
     std::fs::write(&test_file, b"test content").unwrap();
 
     let config = default_config();
     let manifest = Manifest::new(vec![test_file], None, config.clone()).await.unwrap();
-    let key1 = EncryptionKey::new();
-    let key2 = EncryptionKey::new();
+    let key = EncryptionKey::new();
     let total_chunks = manifest.total_chunks(config.chunk_size);
 
     // Create send session
-    let send_session = Session::new_send(manifest, key1, total_chunks);
-    assert!(send_session.manifest().is_some(), "Send session should have manifest");
-    assert!(send_session.destination().is_none(), "Send session should not have destination");
+    let send_session = SendSession::new(manifest, key, total_chunks);
+
+    // Send session should have manifest
+    let manifest = send_session.manifest();
+    assert!(!manifest.files.is_empty(), "Send session should have manifest");
+}
+
+#[tokio::test]
+async fn test_receive_session_has_destination() {
+    let temp_dir = TempDir::new().unwrap();
+    let dest_path = temp_dir.path().to_path_buf();
+    let key = EncryptionKey::new();
 
     // Create receive session
-    let dest_path = temp_dir.path().to_path_buf();
-    let receive_session = Session::new_receive(dest_path, key2, 0);
-    assert!(receive_session.manifest().is_none(), "Receive session should not have manifest");
-    assert!(receive_session.destination().is_some(), "Receive session should have destination");
+    let receive_session = ReceiveSession::new(dest_path.clone(), key);
+
+    // Receive session should have destination
+    assert_eq!(receive_session.destination(), &dest_path, "Receive session should have destination");
 }
 
 #[tokio::test]
@@ -214,7 +217,7 @@ async fn test_session_claim_workflow() {
     let dest_path = temp_dir.path().to_path_buf();
     let key = EncryptionKey::new();
 
-    let session = Session::new_receive(dest_path, key, 0);
+    let session = ReceiveSession::new(dest_path, key);
     let token = session.token();
     let client_id = "test-client-123";
 

@@ -1,4 +1,4 @@
-use crate::ui::output;
+use crate::ui::tui::{spinner, spinner_success};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::process::Stdio;
@@ -22,7 +22,7 @@ pub struct CloudflareTunnel {
 
 impl CloudflareTunnel {
     pub async fn start(local_port: u16) -> Result<Self> {
-        let spinner = output::spinner("Starting Cloudflare tunnel...");
+        let spinner = spinner("Starting Cloudflare tunnel...");
         spinner.enable_steady_tick(Duration::from_millis(80));
 
         let metrics_port = get_available_port()
@@ -62,7 +62,7 @@ impl CloudflareTunnel {
             }
         };
 
-        output::spinner_success(&spinner, "Tunnel established");
+        spinner_success(&spinner, "Tunnel established");
 
         Ok(Self {
             process: child,

@@ -40,28 +40,22 @@ pub fn hash_path(path: &str) -> String {
     format!("{:x}", hasher.finalize())[..16].to_string()
 }
 
-// Validate paths are safe to use
-// Used for receiving.
-// Since receive is writing entire path should be checked
-// no: parent dir travel, abosolute paths, null bytes
-pub fn validate_path(path: &str) -> Result<(), PathValidationError> {
-    if path.is_empty() {
+// Core validation logic shared by both validate_path and validate_filename
+// Checks for: empty strings, null bytes, parent directory traversal, absolute paths
+fn validate_path_components(path_str: &str) -> Result<(), PathValidationError> {
+    if path_str.is_empty() {
         return Err(PathValidationError::Empty);
     }
 
     // null bytes
     // rust uses C-style APIs so \0 can end str early
-    if path.contains('\0') {
+    if path_str.contains('\0') {
         return Err(PathValidationError::NullByte);
     }
 
-    let path = Path::new(path);
+    let path = Path::new(path_str);
 
-    // Keep path in specified dir
-    if path.is_absolute() {
-        return Err(PathValidationError::AbsolutePath);
-    }
-
+    // Check for dangerous path components
     for component in path.components() {
         match component {
             Component::Normal(_) => continue,
@@ -75,29 +69,25 @@ pub fn validate_path(path: &str) -> Result<(), PathValidationError> {
     Ok(())
 }
 
-// Used for send
-// Only sending files so just the name should be valid
-pub fn validate_filename(filename: &str) -> Result<(), PathValidationError> {
-    if filename.is_empty() {
-        return Err(PathValidationError::Empty);
-    }
-    // Check for null byte
-    if filename.contains('\0') {
-        return Err(PathValidationError::NullByte);
-    }
+// Validate paths are safe to use
+// Used for receiving.
+// Since receive is writing entire path should be checked
+// no: parent dir travel, absolute paths, null bytes
+pub fn validate_path(path: &str) -> Result<(), PathValidationError> {
+    validate_path_components(path)?;
 
-    // Check for path traversal components (.., /, etc.)
-    for component in Path::new(filename).components() {
-        match component {
-            Component::Normal(_) => continue,
-            Component::ParentDir => return Err(PathValidationError::ContainsParentDir),
-            Component::RootDir => return Err(PathValidationError::AbsolutePath),
-            Component::CurDir => continue,
-            Component::Prefix(_) => return Err(PathValidationError::InvalidComponent),
-        }
+    // Additional check: reject absolute paths upfront
+    if Path::new(path).is_absolute() {
+        return Err(PathValidationError::AbsolutePath);
     }
 
     Ok(())
+}
+
+// Used for send
+// Only sending files so just the name should be valid
+pub fn validate_filename(filename: &str) -> Result<(), PathValidationError> {
+    validate_path_components(filename)
 }
 
 #[cfg(test)]
