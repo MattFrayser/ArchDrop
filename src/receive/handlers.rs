@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::common::{AppError, Session};
+use crate::common::AppError;
 use crate::crypto::types::Nonce;
 use crate::receive::state::{FileReceiveState, ReceiveAppState};
 use crate::receive::storage::{self, ChunkStorage};
@@ -59,7 +59,7 @@ pub async fn receive_manifest(
 
     let receive_session = &state.receive_sessions;
 
-    let destination = state.session.destination().clone();
+    let destination = state.destination().clone();
 
     let chunk_size = state.config.chunk_size;
 
@@ -74,13 +74,28 @@ pub async fn receive_manifest(
         .map_err(|e| AppError::InsufficientStorage(e.to_string()))?;
 
     let mut session_total_chunks = 0;
+    let file_count = manifest.files.len();
+
+    // Collect file names and chunk totals for progress tracker
+    let mut progress_names: Vec<String> = Vec::with_capacity(file_count);
+    let mut progress_totals: Vec<u64> = Vec::with_capacity(file_count);
 
     // Precreate file sessions to prevent race conditions during parallel upload
-    for file in manifest.files {
+    for (file_index, file) in manifest.files.into_iter().enumerate() {
         let file_chunks = file.size.div_ceil(chunk_size);
         session_total_chunks += file_chunks;
 
         let file_id = security::hash_path(&file.relative_path);
+
+        // Extract filename for progress tracking
+        let filename = std::path::Path::new(&file.relative_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&file.relative_path)
+            .to_string();
+
+        progress_names.push(filename);
+        progress_totals.push(file_chunks);
 
         // If session already exists (on retry), skip creation to avoid truncating data
         if receive_session.contains_key(&file_id) {
@@ -103,13 +118,17 @@ pub async fn receive_manifest(
             nonce: String::new(), // Will be populated by the first arriving chunk
             relative_path: file.relative_path,
             file_size: file.size,
+            file_index,
         };
 
         receive_session.insert(file_id, Arc::new(Mutex::new(new_state)));
     }
 
     // Update session with total chunks
-    state.session.set_total_chunks(session_total_chunks);
+    state.set_total_chunks(session_total_chunks);
+
+    // Initialize progress tracker with all files at once
+    state.progress.init_files(progress_names, progress_totals);
 
     Ok(Json(json!({
         "success": true,
@@ -215,8 +234,8 @@ pub async fn receive_handler(
     );
 
     // Track progress
-    let (_chunks_processed, _total_chunks) = state.session.increment_received_chunk();
-    state.progress.increment();
+    let (_chunks_processed, _total_chunks) = state.increment_received_chunk();
+    state.progress.increment_file(session.file_index);
 
     Ok(Json(json!({
         "success": true,
@@ -264,6 +283,9 @@ pub async fn finalize_upload(
     // Finalize storage
     let computed_hash = session.storage.finalize().await?;
 
+    // Mark file as complete for TUI
+    state.progress.file_complete(session.file_index);
+
     Ok(axum::Json(json!({
         "success": true,
         "sha256": computed_hash,
@@ -278,8 +300,6 @@ pub async fn complete_transfer(
     let client_id = &params.client_id;
     auth::require_active_session(&state.session, &token, client_id)?;
     state.session.complete(&token, &params.client_id);
-
-    state.progress.complete();
 
     Ok(Json(
         json!({"success": true, "message": "Transfer complete"}),
