@@ -1,7 +1,6 @@
 use std::sync::Arc;
-use std::time::Duration;
 
-use crate::common::{AppError, Manifest, Session};
+use crate::common::{AppError, Manifest};
 use crate::crypto::{self, Nonce};
 use crate::send::file_handle::SendFileHandle;
 use crate::server::auth::{self, ClientIdParam};
@@ -14,7 +13,6 @@ use axum::{
     Json,
 };
 use reqwest::header;
-use tokio::time::sleep;
 
 use super::SendAppState;
 
@@ -35,7 +33,16 @@ pub async fn manifest_handler(
     auth::claim_or_validate_session(&state.session, &token, &params.client_id)?;
 
     // Get manifest from session
-    let manifest = state.session.manifest();
+    let manifest = state.manifest();
+
+    // Initialize file tracking for TUI
+    let names: Vec<String> = manifest.files.iter().map(|f| f.name.clone()).collect();
+    let totals: Vec<u64> = manifest
+        .files
+        .iter()
+        .map(|f| f.size.div_ceil(state.config.chunk_size))
+        .collect();
+    state.progress.init_files(names, totals);
 
     Ok(Json(manifest.clone()))
 }
@@ -49,19 +56,18 @@ pub async fn send_handler(
     let client_id = &params.client_id;
     auth::require_active_session(&state.session, &token, client_id)?;
 
-    // Some browser send multiple retries (safari)
-    // Be noted to not count towards total
-    let is_retry = state.session.has_chunk_been_sent(file_index, chunk_index);
-    if !is_retry {
-        state.session.mark_chunk_sent(file_index, chunk_index);
-        state.progress.increment();
-    }
-
     let file_entry = state
-        .session
         .get_file(file_index)
         .ok_or_else(|| AppError::BadRequest(format!("file_index out of bounds: {}", file_index)))?;
     let chunk_size = state.config.chunk_size;
+
+    // Some browser send multiple retries (safari)
+    // Be noted to not count towards total
+    let is_retry = state.has_chunk_been_sent(file_index, chunk_index);
+    if !is_retry {
+        state.mark_chunk_sent(file_index, chunk_index);
+        state.progress.increment_file(file_index);
+    }
 
     // Get or create file handle (lazy initialization)
     let file_handle = state
@@ -139,24 +145,23 @@ pub async fn complete_download(
     Query(params): Query<ChunkParams>,
     State(state): State<SendAppState>,
 ) -> Result<axum::Json<serde_json::Value>, AppError> {
-
-    // Session must be active and owned to complete
     let client_id = &params.client_id;
 
-    // If the session is ALREADY completed, resend the success signal
-    // and return 200 OK. Handles the client retrying on network failure.
-    if state.session.complete(&token, client_id) {
-        state.progress.complete();
+    // If the session is ALREADY completed, return 200 OK.
+    // Handles the client retrying on network failure.
+    // file_complete is idempotent so no need to re-signal progress.
+    if state.session.is_completed() {
         return Ok(axum::Json(serde_json::json!({
            "success": true,
            "message": "Already completed"
         })));
     }
 
-    let chunks_sent = state.session.get_chunks_sent();
-    let total_chunks = state.session.get_total_chunks();
-
+    // Session must be active and owned to complete
     auth::require_active_session(&state.session, &token, client_id)?;
+
+    let chunks_sent = state.get_chunks_sent();
+    let total_chunks = state.get_total_chunks();
 
     // Verify all chunks were actually sent
     if chunks_sent < total_chunks {
@@ -169,21 +174,17 @@ pub async fn complete_download(
     }
 
     state.session.complete(&token, client_id);
+    mark_all_files_complete(&state);
 
-    // preprepare body
-    let response_body = axum::Json(serde_json::json!({
+    Ok(axum::Json(serde_json::json!({
         "success": true,
         "message": "Download successful. Initiating server shutdown."
-    }));
+    })))
+}
 
-    // Wait until Axum response leaves to signal shutdown on 100%
-    // 50ms should be enough to ensure proper HTTP res
-    let progress_clone = state.progress.clone();
-    tokio::spawn(async move {
-        sleep(Duration::from_millis(50)).await;
-        eprintln!("TUI shutdown signal (100.0) sent successfully. Exiting now.");
-        progress_clone.complete();
-    });
-
-    Ok(response_body)
+fn mark_all_files_complete(state: &SendAppState) {
+    let manifest = state.manifest();
+    for i in 0..manifest.files.len() {
+        state.progress.file_complete(i);
+    }
 }
