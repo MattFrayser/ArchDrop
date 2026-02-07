@@ -1,57 +1,39 @@
 use super::runtime;
-use crate::common::{Manifest, TransferConfig};
+use crate::common::config::{AppConfig, Transport};
+use crate::common::Manifest;
 use crate::crypto::types::{EncryptionKey, Nonce};
-use crate::receive::{ReceiveAppState, ReceiveSession};
-use crate::send::{SendAppState, SendSession};
+use crate::receive::ReceiveAppState;
+use crate::send::SendAppState;
 use crate::server::progress::ProgressTracker;
 use crate::server::routes;
 use anyhow::Result;
 use axum::Router;
 use std::path::PathBuf;
-use tokio::sync::watch;
-
-// Based off cli flags
-pub enum ServerMode {
-    Local,
-    Tunnel,
-}
+use std::sync::Arc;
 
 // Server configuration
 pub struct ServerInstance {
     pub app: axum::Router,
-    pub display_name: String, // shown in tui
-    pub progress_sender: watch::Sender<f64>,
+    pub display_name: String,
 }
 
 impl ServerInstance {
-    pub fn new(app: Router, display_name: String, progress_sender: watch::Sender<f64>) -> Self {
-        Self {
-            app,
-            display_name,
-            progress_sender,
-        }
-    }
-
-    // Tui status bar
-    pub fn progress_receiver(&self) -> watch::Receiver<f64> {
-        self.progress_sender.subscribe()
-    }
-}
-
-pub fn get_transfer_config(mode: &ServerMode) -> TransferConfig {
-    match mode {
-        ServerMode::Tunnel => TransferConfig::tunnel(),
-        ServerMode::Local => TransferConfig::local(),
+    pub fn new(app: Router, display_name: String) -> Self {
+        Self { app, display_name }
     }
 }
 
 //----------------
 // SEND SERVER
 //---------------
-pub async fn start_send_server(manifest: Manifest, mode: ServerMode) -> Result<u16> {
+pub async fn start_send_server(
+    manifest: Manifest,
+    transport: Transport,
+    config: &AppConfig,
+) -> Result<u16> {
     let session_key = EncryptionKey::new();
     let nonce = Nonce::new();
-    let config = get_transfer_config(&mode);
+    let transfer_settings = config.transfer_settings(transport);
 
     // TUI display
     let display_name = if manifest.files.len() == 1 {
@@ -61,31 +43,47 @@ pub async fn start_send_server(manifest: Manifest, mode: ServerMode) -> Result<u
     };
 
     // Send specific session
-    let total_chunks = manifest.total_chunks(config.chunk_size);
-    let send_session = SendSession::new(manifest, session_key, total_chunks);
-    let (progress_sender, _) = tokio::sync::watch::channel(0.0);
-    let progress_tracker = ProgressTracker::new(total_chunks, progress_sender.clone());
+    let total_chunks = manifest.total_chunks(transfer_settings.chunk_size);
+    let progress_tracker = Arc::new(ProgressTracker::new());
 
     // Create typed state for router
-    let send_state = SendAppState::new(send_session.clone(), progress_tracker.clone(), config);
+    let send_state =
+        SendAppState::new(session_key, manifest, total_chunks, progress_tracker.clone(), transfer_settings);
     let app = routes::create_send_router(&send_state);
 
-    let server = ServerInstance::new(app, display_name, progress_sender);
+    let server = ServerInstance::new(app, display_name);
 
     // Call runtime functions directly with typed state
-    match mode {
-        ServerMode::Local => runtime::start_https(server, send_state, nonce).await,
-        ServerMode::Tunnel => runtime::start_tunnel(server, send_state, nonce).await,
+    match transport {
+        Transport::Local => {
+            runtime::start_https(server, send_state, nonce, transport, config, progress_tracker)
+                .await
+        }
+        _ => {
+            runtime::start_tunnel(
+                server,
+                send_state,
+                nonce,
+                transport,
+                config,
+                progress_tracker,
+            )
+            .await
+        }
     }
 }
 
 //----------------
 // RECEIVE SERVER
 //----------------
-pub async fn start_receive_server(destination: PathBuf, mode: ServerMode) -> Result<u16> {
+pub async fn start_receive_server(
+    destination: PathBuf,
+    transport: Transport,
+    config: &AppConfig,
+) -> Result<u16> {
     let session_key = EncryptionKey::new();
     let nonce = Nonce::new();
-    let config = get_transfer_config(&mode);
+    let transfer_settings = config.transfer_settings(transport);
 
     // TUI display name
     let display_name = destination
@@ -96,20 +94,42 @@ pub async fn start_receive_server(destination: PathBuf, mode: ServerMode) -> Res
 
     // Receive specific session
     // Start with 0, will be updated when manifest arrives from client
-    let receive_session = ReceiveSession::new(destination, session_key);
-    let (progress_sender, _) = tokio::sync::watch::channel(0.0);
-    let progress_tracker = ProgressTracker::new(0, progress_sender.clone()); // 0 chunks initially
+    let progress_tracker = Arc::new(ProgressTracker::new());
 
     // Create typed state for router
-    let receive_state =
-        ReceiveAppState::new(receive_session.clone(), progress_tracker.clone(), config);
+    let receive_state = ReceiveAppState::new(
+        session_key,
+        destination,
+        progress_tracker.clone(),
+        transfer_settings,
+    );
     let app = routes::create_receive_router(&receive_state);
 
-    let server = ServerInstance::new(app, display_name, progress_sender);
+    let server = ServerInstance::new(app, display_name);
 
     // Call runtime functions directly with typed state
-    match mode {
-        ServerMode::Local => runtime::start_https(server, receive_state, nonce).await,
-        ServerMode::Tunnel => runtime::start_tunnel(server, receive_state, nonce).await,
+    match transport {
+        Transport::Local => {
+            runtime::start_https(
+                server,
+                receive_state,
+                nonce,
+                transport,
+                config,
+                progress_tracker,
+            )
+            .await
+        }
+        _ => {
+            runtime::start_tunnel(
+                server,
+                receive_state,
+                nonce,
+                transport,
+                config,
+                progress_tracker,
+            )
+            .await
+        }
     }
 }
