@@ -1,13 +1,10 @@
 mod common;
 
 use common::{CHUNK_SIZE, CLIENT_ID, default_config, setup_temp_dir, create_cipher};
-use archdrop::common::Session;
-use aes_gcm::{Aes256Gcm, KeyInit};
-use archdrop::common::TransferConfig;
 use archdrop::crypto::types::{EncryptionKey, Nonce};
 use archdrop::receive::ReceiveAppState;
-use archdrop::receive::ReceiveSession;
 use archdrop::server::progress::ProgressTracker;
+use std::sync::Arc;
 use archdrop::server::routes;
 use axum::{
     body::Body,
@@ -15,20 +12,16 @@ use axum::{
     Router,
 };
 use http_body_util::BodyExt;
-use sha2::digest::generic_array::GenericArray;
 use std::path::PathBuf;
-use tempfile::TempDir;
 use tower::ServiceExt;
 
 // Create router with state for testing
-fn create_test_app(output_dir: PathBuf, key: EncryptionKey) -> (Router, ReceiveSession) {
-    let session = ReceiveSession::new(output_dir, key);
-    let (progress_sender, _) = tokio::sync::watch::channel(0.0);
-    let progress = ProgressTracker::new(0, progress_sender);
+fn create_test_app(output_dir: PathBuf, key: EncryptionKey) -> (Router, ReceiveAppState) {
+    let progress = Arc::new(ProgressTracker::new());
     let config = default_config();
-    let state = ReceiveAppState::new(session.clone(), progress, config);
+    let state = ReceiveAppState::new(key, output_dir, progress, config);
     let app = routes::create_receive_router(&state);
-    (app, session)
+    (app, state)
 }
 
 fn create_test_data(pattern: u8, size: usize) -> Vec<u8> {
@@ -48,6 +41,7 @@ fn build_json_request(uri: &str, json: serde_json::Value) -> Request<Body> {
 }
 
 // Helper to build multipart request for chunk upload
+#[allow(clippy::too_many_arguments)]
 fn build_multipart_request(
     uri: &str,
     relative_path: &str,
@@ -140,7 +134,7 @@ async fn extract_json(response: axum::response::Response) -> serde_json::Value {
 async fn test_complete_file_upload() {
     let temp_dir = setup_temp_dir();
     let key = EncryptionKey::new();
-    let (app, session) = create_test_app(temp_dir.path().to_path_buf(), key.clone());
+    let (app, state) = create_test_app(temp_dir.path().to_path_buf(), key.clone());
 
     // Generate test file
     let file_data = b"Hello, ArchDrop! This is test data.";
@@ -149,7 +143,7 @@ async fn test_complete_file_upload() {
     // Send manifest
     let manifest_uri = format!(
         "/receive/{}/manifest?clientId={}",
-        session.token(),
+        state.session.token(),
         CLIENT_ID
     );
     let manifest = serde_json::json!({
@@ -174,7 +168,7 @@ async fn test_complete_file_upload() {
     let encrypted = archdrop::crypto::encrypt_chunk_at_position(&cipher, &nonce, file_data, 0)
         .expect("Failed to encrypt chunk");
 
-    let chunk_uri = format!("/receive/{}/chunk", session.token());
+    let chunk_uri = format!("/receive/{}/chunk", state.session.token());
     let request = build_multipart_request(
         &chunk_uri,
         "test.txt",
@@ -196,7 +190,7 @@ async fn test_complete_file_upload() {
     // Finalize
     let finalize_uri = format!(
         "/receive/{}/finalize?clientId={}",
-        session.token(),
+        state.session.token(),
         CLIENT_ID
     );
     let request = build_finalize_request(&finalize_uri, "test.txt");
@@ -235,7 +229,7 @@ async fn test_complete_file_upload() {
 async fn test_chunk_decryption_correctness() {
     let temp_dir = setup_temp_dir();
     let key = EncryptionKey::new();
-    let (app, session) = create_test_app(temp_dir.path().to_path_buf(), key.clone());
+    let (app, state) = create_test_app(temp_dir.path().to_path_buf(), key.clone());
 
     let plaintext = b"Known test data for verification";
     let nonce = Nonce::new();
@@ -243,7 +237,7 @@ async fn test_chunk_decryption_correctness() {
     // Send manifest
     let manifest_uri = format!(
         "/receive/{}/manifest?clientId={}",
-        session.token(),
+        state.session.token(),
         CLIENT_ID
     );
     let manifest = serde_json::json!({
@@ -266,7 +260,7 @@ async fn test_chunk_decryption_correctness() {
     let encrypted = archdrop::crypto::encrypt_chunk_at_position(&cipher, &nonce, plaintext, 0)
         .expect("Failed to encrypt chunk");
 
-    let chunk_uri = format!("/receive/{}/chunk", session.token());
+    let chunk_uri = format!("/receive/{}/chunk", state.session.token());
     let request = build_multipart_request(
         &chunk_uri,
         "decrypt_test.bin",
@@ -288,7 +282,7 @@ async fn test_chunk_decryption_correctness() {
     // Finalize
     let finalize_uri = format!(
         "/receive/{}/finalize?clientId={}",
-        session.token(),
+        state.session.token(),
         CLIENT_ID
     );
     let request = build_finalize_request(&finalize_uri, "decrypt_test.bin");
@@ -310,7 +304,7 @@ async fn test_chunk_decryption_correctness() {
 async fn test_out_of_order_chunks() {
     let temp_dir = setup_temp_dir();
     let key = EncryptionKey::new();
-    let (app, session) = create_test_app(temp_dir.path().to_path_buf(), key.clone());
+    let (app, state) = create_test_app(temp_dir.path().to_path_buf(), key.clone());
 
     // Create 3-chunk file with distinct patterns
     let chunk0 = create_test_data(0x00, CHUNK_SIZE);
@@ -322,7 +316,7 @@ async fn test_out_of_order_chunks() {
     // Send manifest
     let manifest_uri = format!(
         "/receive/{}/manifest?clientId={}",
-        session.token(),
+        state.session.token(),
         CLIENT_ID
     );
     let manifest = serde_json::json!({
@@ -341,7 +335,7 @@ async fn test_out_of_order_chunks() {
         .expect("Failed to send manifest");
 
     let cipher = create_cipher(&key);
-    let chunk_uri = format!("/receive/{}/chunk", session.token());
+    let chunk_uri = format!("/receive/{}/chunk", state.session.token());
 
     // Upload in order: 2, 0, 1 (out of order)
 
@@ -402,7 +396,7 @@ async fn test_out_of_order_chunks() {
     // Finalize
     let finalize_uri = format!(
         "/receive/{}/finalize?clientId={}",
-        session.token(),
+        state.session.token(),
         CLIENT_ID
     );
     let request = build_finalize_request(&finalize_uri, "ordered.bin");
@@ -432,7 +426,7 @@ async fn test_out_of_order_chunks() {
 async fn test_concurrent_chunks_same_file() {
     let temp_dir = setup_temp_dir();
     let key = EncryptionKey::new();
-    let (app, session) = create_test_app(temp_dir.path().to_path_buf(), key.clone());
+    let (app, state) = create_test_app(temp_dir.path().to_path_buf(), key.clone());
 
     // Send manifest for 6-chunk file
     let num_chunks = 6;
@@ -441,7 +435,7 @@ async fn test_concurrent_chunks_same_file() {
 
     let manifest_uri = format!(
         "/receive/{}/manifest?clientId={}",
-        session.token(),
+        state.session.token(),
         CLIENT_ID
     );
     let manifest = serde_json::json!({
@@ -454,16 +448,17 @@ async fn test_concurrent_chunks_same_file() {
     });
 
     let request = build_json_request(&manifest_uri, manifest);
-    app.clone()
+    let resp = app.clone()
         .oneshot(request)
         .await
         .expect("Failed to send manifest");
+    assert_eq!(resp.status(), StatusCode::OK, "Manifest request failed");
 
     // Upload all 6 chunks concurrently
     let mut tasks = vec![];
     for chunk_idx in 0..num_chunks {
         let app = app.clone();
-        let session_token = session.token().to_string();
+        let session_token = state.session.token().to_string();
         let key = key.clone();
         let nonce = nonce.clone();
 
@@ -508,7 +503,7 @@ async fn test_concurrent_chunks_same_file() {
     // Finalize
     let finalize_uri = format!(
         "/receive/{}/finalize?clientId={}",
-        session.token(),
+        state.session.token(),
         CLIENT_ID
     );
     let request = build_finalize_request(&finalize_uri, "concurrent.bin");
@@ -547,7 +542,7 @@ async fn test_concurrent_chunks_same_file() {
 async fn test_chunk_wrong_nonce() {
     let temp_dir = setup_temp_dir();
     let key = EncryptionKey::new();
-    let (app, session) = create_test_app(temp_dir.path().to_path_buf(), key.clone());
+    let (app, state) = create_test_app(temp_dir.path().to_path_buf(), key.clone());
 
     let data = b"Test data for wrong nonce";
     let correct_nonce = Nonce::new();
@@ -556,7 +551,7 @@ async fn test_chunk_wrong_nonce() {
     // Send manifest with correct nonce
     let manifest_uri = format!(
         "/receive/{}/manifest?clientId={}",
-        session.token(),
+        state.session.token(),
         CLIENT_ID
     );
     let manifest = serde_json::json!({
@@ -580,7 +575,7 @@ async fn test_chunk_wrong_nonce() {
         .expect("Failed to encrypt chunk");
 
     // Upload chunk with correct nonce in metadata but wrong encrypted data
-    let chunk_uri = format!("/receive/{}/chunk", session.token());
+    let chunk_uri = format!("/receive/{}/chunk", state.session.token());
     let request = build_multipart_request(
         &chunk_uri,
         "test.bin",
@@ -610,7 +605,7 @@ async fn test_chunk_wrong_nonce() {
 async fn test_chunk_without_manifest() {
     let temp_dir = setup_temp_dir();
     let key = EncryptionKey::new();
-    let (app, session) = create_test_app(temp_dir.path().to_path_buf(), key.clone());
+    let (app, state) = create_test_app(temp_dir.path().to_path_buf(), key.clone());
 
     let data = b"Test data";
     let nonce = Nonce::new();
@@ -619,7 +614,7 @@ async fn test_chunk_without_manifest() {
         .expect("Failed to encrypt chunk");
 
     // Skip manifest, send chunk directly
-    let chunk_uri = format!("/receive/{}/chunk", session.token());
+    let chunk_uri = format!("/receive/{}/chunk", state.session.token());
     let request = build_multipart_request(
         &chunk_uri,
         "test.bin",
@@ -649,7 +644,7 @@ async fn test_chunk_without_manifest() {
 async fn test_duplicate_chunk_detection() {
     let temp_dir = setup_temp_dir();
     let key = EncryptionKey::new();
-    let (app, session) = create_test_app(temp_dir.path().to_path_buf(), key.clone());
+    let (app, state) = create_test_app(temp_dir.path().to_path_buf(), key.clone());
 
     let data = b"Duplicate test data";
     let nonce = Nonce::new();
@@ -657,7 +652,7 @@ async fn test_duplicate_chunk_detection() {
     // Send manifest
     let manifest_uri = format!(
         "/receive/{}/manifest?clientId={}",
-        session.token(),
+        state.session.token(),
         CLIENT_ID
     );
     let manifest = serde_json::json!({
@@ -680,7 +675,7 @@ async fn test_duplicate_chunk_detection() {
     let encrypted = archdrop::crypto::encrypt_chunk_at_position(&cipher, &nonce, data, 0)
         .expect("Failed to encrypt chunk");
 
-    let chunk_uri = format!("/receive/{}/chunk", session.token());
+    let chunk_uri = format!("/receive/{}/chunk", state.session.token());
 
     // Upload chunk 0
     let request1 = build_multipart_request(
@@ -734,7 +729,7 @@ async fn test_duplicate_chunk_detection() {
 async fn test_manifest_requires_authentication() {
     let temp_dir = setup_temp_dir();
     let key = EncryptionKey::new();
-    let (app, session) = create_test_app(temp_dir.path().to_path_buf(), key);
+    let (app, state) = create_test_app(temp_dir.path().to_path_buf(), key);
 
     let manifest = serde_json::json!({
         "files": [
@@ -746,7 +741,7 @@ async fn test_manifest_requires_authentication() {
     });
 
     // Send manifest without clientId parameter
-    let uri = format!("/receive/{}/manifest", session.token());
+    let uri = format!("/receive/{}/manifest", state.session.token());
     let request = build_json_request(&uri, manifest);
 
     let response = app
@@ -770,7 +765,7 @@ async fn test_manifest_requires_authentication() {
 async fn test_manifest_overflow_protection() {
     let temp_dir = setup_temp_dir();
     let key = EncryptionKey::new();
-    let (app, session) = create_test_app(temp_dir.path().to_path_buf(), key);
+    let (app, state) = create_test_app(temp_dir.path().to_path_buf(), key);
 
     // Create manifest with file sizes that would overflow u64 when summed
     let manifest = serde_json::json!({
@@ -788,7 +783,7 @@ async fn test_manifest_overflow_protection() {
 
     let manifest_uri = format!(
         "/receive/{}/manifest?clientId={}",
-        session.token(),
+        state.session.token(),
         CLIENT_ID
     );
     let request = build_json_request(&manifest_uri, manifest);
@@ -812,7 +807,7 @@ async fn test_manifest_overflow_protection() {
 async fn test_manifest_accepts_small_transfer() {
     let temp_dir = setup_temp_dir();
     let key = EncryptionKey::new();
-    let (app, session) = create_test_app(temp_dir.path().to_path_buf(), key);
+    let (app, state) = create_test_app(temp_dir.path().to_path_buf(), key);
 
     // Small transfer that will definitely fit - validates disk space check passes
     let one_mb = 1024 * 1024;
@@ -831,7 +826,7 @@ async fn test_manifest_accepts_small_transfer() {
 
     let manifest_uri = format!(
         "/receive/{}/manifest?clientId={}",
-        session.token(),
+        state.session.token(),
         CLIENT_ID
     );
     let request = build_json_request(&manifest_uri, manifest);
@@ -854,7 +849,7 @@ async fn test_manifest_accepts_small_transfer() {
 async fn test_manifest_rejects_on_insufficient_space() {
     let temp_dir = setup_temp_dir();
     let key = EncryptionKey::new();
-    let (app, session) = create_test_app(temp_dir.path().to_path_buf(), key);
+    let (app, state) = create_test_app(temp_dir.path().to_path_buf(), key);
 
     // Request 1 petabyte - should fail disk space check (no test system has this)
     let one_pb = 1024u64 * 1024 * 1024 * 1024 * 1024;
@@ -869,7 +864,7 @@ async fn test_manifest_rejects_on_insufficient_space() {
 
     let manifest_uri = format!(
         "/receive/{}/manifest?clientId={}",
-        session.token(),
+        state.session.token(),
         CLIENT_ID
     );
     let request = build_json_request(&manifest_uri, manifest);
@@ -892,7 +887,7 @@ async fn test_manifest_rejects_on_insufficient_space() {
 async fn test_manifest_empty_files_list() {
     let temp_dir = setup_temp_dir();
     let key = EncryptionKey::new();
-    let (app, session) = create_test_app(temp_dir.path().to_path_buf(), key);
+    let (app, state) = create_test_app(temp_dir.path().to_path_buf(), key);
 
     // Empty manifest should be valid (no overflow, no disk needed)
     let manifest = serde_json::json!({
@@ -901,7 +896,7 @@ async fn test_manifest_empty_files_list() {
 
     let manifest_uri = format!(
         "/receive/{}/manifest?clientId={}",
-        session.token(),
+        state.session.token(),
         CLIENT_ID
     );
     let request = build_json_request(&manifest_uri, manifest);

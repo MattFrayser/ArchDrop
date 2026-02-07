@@ -1,14 +1,11 @@
 mod common;
 
 use common::{CHUNK_SIZE, CLIENT_ID, default_config, setup_temp_dir, create_cipher};
-use archdrop::common::Session;
-use aes_gcm::{Aes256Gcm, KeyInit};
 use archdrop::crypto::types::{EncryptionKey, Nonce};
-use archdrop::common::TransferConfig;
 use archdrop::server::routes;
-use archdrop::send::SendSession;
 use archdrop::send::SendAppState;
 use archdrop::server::progress::ProgressTracker;
+use std::sync::Arc;
 use archdrop::common::Manifest;
 use axum::{
     body::Body,
@@ -16,7 +13,6 @@ use axum::{
     Router,
 };
 use http_body_util::BodyExt;
-use sha2::digest::generic_array::GenericArray;
 use std::path::PathBuf;
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -43,25 +39,23 @@ async fn create_test_files(temp_dir: &TempDir, files: Vec<(&str, &[u8])>) -> Vec
 async fn create_test_send_app(
     file_paths: Vec<PathBuf>,
     key: EncryptionKey,
-) -> (Router, SendSession, u64) {
+) -> (Router, SendAppState, u64) {
     let config = default_config();
-    let manifest = Manifest::new(file_paths, None, config.clone())
+    let manifest = Manifest::new(file_paths, None, config)
         .await
         .expect("Failed to create manifest");
 
     let total_chunks = manifest
         .files
         .iter()
-        .map(|f| (f.size + CHUNK_SIZE as u64 - 1) / CHUNK_SIZE as u64)
+        .map(|f| f.size.div_ceil(CHUNK_SIZE as u64))
         .sum();
 
-    let session = SendSession::new(manifest, key, total_chunks);
-    let (progress_sender, _) = tokio::sync::watch::channel(0.0);
-    let progress = ProgressTracker::new(total_chunks, progress_sender);
-    let state = SendAppState::new(session.clone(), progress, config);
+    let progress = Arc::new(ProgressTracker::new());
+    let state = SendAppState::new(key, manifest, total_chunks, progress, config);
     let app = routes::create_send_router(&state);
 
-    (app, session, total_chunks)
+    (app, state, total_chunks)
 }
 
 // Helper to build GET request with query params
@@ -114,7 +108,7 @@ async fn test_health_check() {
     let key = EncryptionKey::new();
     let file_data = b"test";
     let paths = create_test_files(&temp_dir, vec![("test.txt", file_data)]).await;
-    let (app, _session, _) = create_test_send_app(paths, key.clone()).await;
+    let (app, _state, _) = create_test_send_app(paths, key.clone()).await;
 
     let request = build_get_request("/health");
     let response = app.oneshot(request).await.expect("Failed to send request");
@@ -142,10 +136,10 @@ async fn test_manifest_handler_returns_file_list() {
     )
     .await;
 
-    let (app, session, _) = create_test_send_app(paths, key.clone()).await;
+    let (app, state, _) = create_test_send_app(paths, key.clone()).await;
 
     // Request manifest
-    let uri = format!("/send/{}/manifest?clientId={}", session.token(), CLIENT_ID);
+    let uri = format!("/send/{}/manifest?clientId={}", state.session.token(), CLIENT_ID);
     let request = build_get_request(&uri);
     let response = app.oneshot(request).await.expect("Failed to send request");
 
@@ -179,10 +173,10 @@ async fn test_chunk_handler_returns_encrypted_data() {
     let file_data = vec![0xAB; CHUNK_SIZE * 3];
     let paths = create_test_files(&temp_dir, vec![("large.bin", &file_data)]).await;
 
-    let (app, session, _) = create_test_send_app(paths, key.clone()).await;
+    let (app, state, _) = create_test_send_app(paths, key.clone()).await;
 
     // Claim session first by requesting manifest
-    let manifest_uri = format!("/send/{}/manifest?clientId={}", session.token(), CLIENT_ID);
+    let manifest_uri = format!("/send/{}/manifest?clientId={}", state.session.token(), CLIENT_ID);
     let manifest_req = build_get_request(&manifest_uri);
     let _ = app
         .clone()
@@ -193,7 +187,7 @@ async fn test_chunk_handler_returns_encrypted_data() {
     // Request chunk 1 (middle chunk)
     let chunk_uri = format!(
         "/send/{}/{}/chunk/{}?clientId={}",
-        session.token(),
+        state.session.token(),
         0,
         1,
         CLIENT_ID
@@ -228,10 +222,10 @@ async fn test_chunk_decryption_correctness() {
     file_data.extend(vec![0x22; CHUNK_SIZE]); // Chunk 2: all 0x22
 
     let paths = create_test_files(&temp_dir, vec![("test.bin", &file_data)]).await;
-    let (app, session, _) = create_test_send_app(paths, key.clone()).await;
+    let (app, state, _) = create_test_send_app(paths, key.clone()).await;
 
     // Claim session
-    let manifest_uri = format!("/send/{}/manifest?clientId={}", session.token(), CLIENT_ID);
+    let manifest_uri = format!("/send/{}/manifest?clientId={}", state.session.token(), CLIENT_ID);
     let manifest_req = build_get_request(&manifest_uri);
     let manifest_resp = app
         .clone()
@@ -246,7 +240,7 @@ async fn test_chunk_decryption_correctness() {
     for chunk_idx in 0..3 {
         let chunk_uri = format!(
             "/send/{}/0/chunk/{}?clientId={}",
-            session.token(),
+            state.session.token(),
             chunk_idx,
             CLIENT_ID
         );
@@ -291,10 +285,10 @@ async fn test_complete_download_succeeds() {
     let file_data = b"Small file content";
     let paths = create_test_files(&temp_dir, vec![("test.txt", file_data)]).await;
 
-    let (app, session, _) = create_test_send_app(paths, key.clone()).await;
+    let (app, state, _) = create_test_send_app(paths, key.clone()).await;
 
     // Claim session
-    let manifest_uri = format!("/send/{}/manifest?clientId={}", session.token(), CLIENT_ID);
+    let manifest_uri = format!("/send/{}/manifest?clientId={}", state.session.token(), CLIENT_ID);
     let manifest_req = build_get_request(&manifest_uri);
     let _ = app
         .clone()
@@ -303,7 +297,7 @@ async fn test_complete_download_succeeds() {
         .expect("Failed to get manifest");
 
     // Complete download
-    let complete_uri = format!("/send/{}/complete?clientId={}", session.token(), CLIENT_ID);
+    let complete_uri = format!("/send/{}/complete?clientId={}", state.session.token(), CLIENT_ID);
     let request = build_post_request(&complete_uri);
     let response = app.oneshot(request).await.expect("Failed to send request");
 
@@ -325,12 +319,12 @@ async fn test_manifest_requires_claim() {
     let file_data = b"Test file";
     let paths = create_test_files(&temp_dir, vec![("test.txt", file_data)]).await;
 
-    let (app, session, _) = create_test_send_app(paths, key.clone()).await;
+    let (app, state, _) = create_test_send_app(paths, key.clone()).await;
 
     // Try to request manifest without client_id (should fail or require it)
     // Note: The actual behavior depends on how Axum handles missing query params
     // For now, test with valid client_id to ensure claiming works
-    let uri = format!("/send/{}/manifest?clientId={}", session.token(), CLIENT_ID);
+    let uri = format!("/send/{}/manifest?clientId={}", state.session.token(), CLIENT_ID);
     let request = build_get_request(&uri);
     let response = app
         .clone()
@@ -344,7 +338,7 @@ async fn test_manifest_requires_claim() {
     // Now try with different client_id - should fail
     let uri2 = format!(
         "/send/{}/manifest?clientId=different-client",
-        session.token()
+        state.session.token()
     );
     let request2 = build_get_request(&uri2);
     let response2 = app.oneshot(request2).await.expect("Failed to send request");
@@ -366,10 +360,10 @@ async fn test_chunk_requires_active_session() {
     let file_data = b"Test file content";
     let paths = create_test_files(&temp_dir, vec![("test.txt", file_data)]).await;
 
-    let (app, session, _) = create_test_send_app(paths, key.clone()).await;
+    let (app, state, _) = create_test_send_app(paths, key.clone()).await;
 
     // Try to request chunk without claiming session first
-    let chunk_uri = format!("/send/{}/0/chunk/0?clientId={}", session.token(), CLIENT_ID);
+    let chunk_uri = format!("/send/{}/0/chunk/0?clientId={}", state.session.token(), CLIENT_ID);
     let request = build_get_request(&chunk_uri);
     let response = app.oneshot(request).await.expect("Failed to send request");
 
@@ -390,10 +384,10 @@ async fn test_different_client_id_rejected() {
     let file_data = b"Test file";
     let paths = create_test_files(&temp_dir, vec![("test.txt", file_data)]).await;
 
-    let (app, session, _) = create_test_send_app(paths, key.clone()).await;
+    let (app, state, _) = create_test_send_app(paths, key.clone()).await;
 
     // Claim with client A
-    let manifest_uri = format!("/send/{}/manifest?clientId=client_a", session.token());
+    let manifest_uri = format!("/send/{}/manifest?clientId=client_a", state.session.token());
     let manifest_req = build_get_request(&manifest_uri);
     let _ = app
         .clone()
@@ -402,7 +396,7 @@ async fn test_different_client_id_rejected() {
         .expect("Failed to get manifest");
 
     // Try to request chunk with client B
-    let chunk_uri = format!("/send/{}/0/chunk/0?clientId=client_b", session.token());
+    let chunk_uri = format!("/send/{}/0/chunk/0?clientId=client_b", state.session.token());
     let request = build_get_request(&chunk_uri);
     let response = app.oneshot(request).await.expect("Failed to send request");
 
@@ -428,10 +422,10 @@ async fn test_chunk_index_out_of_bounds() {
     let file_data = vec![0xAA; CHUNK_SIZE / 2];
     let paths = create_test_files(&temp_dir, vec![("small.bin", &file_data)]).await;
 
-    let (app, session, _) = create_test_send_app(paths, key.clone()).await;
+    let (app, state, _) = create_test_send_app(paths, key.clone()).await;
 
     // Claim session
-    let manifest_uri = format!("/send/{}/manifest?clientId={}", session.token(), CLIENT_ID);
+    let manifest_uri = format!("/send/{}/manifest?clientId={}", state.session.token(), CLIENT_ID);
     let manifest_req = build_get_request(&manifest_uri);
     let _ = app
         .clone()
@@ -442,7 +436,7 @@ async fn test_chunk_index_out_of_bounds() {
     // Request chunk 999 (out of bounds)
     let chunk_uri = format!(
         "/send/{}/0/chunk/999?clientId={}",
-        session.token(),
+        state.session.token(),
         CLIENT_ID
     );
     let request = build_get_request(&chunk_uri);
@@ -460,10 +454,10 @@ async fn test_file_index_out_of_bounds() {
     let file_data = b"Test file";
     let paths = create_test_files(&temp_dir, vec![("test.txt", file_data)]).await;
 
-    let (app, session, _) = create_test_send_app(paths, key.clone()).await;
+    let (app, state, _) = create_test_send_app(paths, key.clone()).await;
 
     // Claim session
-    let manifest_uri = format!("/send/{}/manifest?clientId={}", session.token(), CLIENT_ID);
+    let manifest_uri = format!("/send/{}/manifest?clientId={}", state.session.token(), CLIENT_ID);
     let manifest_req = build_get_request(&manifest_uri);
     let _ = app
         .clone()
@@ -474,7 +468,7 @@ async fn test_file_index_out_of_bounds() {
     // Request file index 999 (out of bounds)
     let chunk_uri = format!(
         "/send/{}/999/chunk/0?clientId={}",
-        session.token(),
+        state.session.token(),
         CLIENT_ID
     );
     let request = build_get_request(&chunk_uri);
@@ -492,10 +486,10 @@ async fn test_duplicate_chunk_request_idempotent() {
     let file_data = vec![0xFF; CHUNK_SIZE * 2];
     let paths = create_test_files(&temp_dir, vec![("test.bin", &file_data)]).await;
 
-    let (app, session, _) = create_test_send_app(paths, key.clone()).await;
+    let (app, state, _) = create_test_send_app(paths, key.clone()).await;
 
     // Claim session
-    let manifest_uri = format!("/send/{}/manifest?clientId={}", session.token(), CLIENT_ID);
+    let manifest_uri = format!("/send/{}/manifest?clientId={}", state.session.token(), CLIENT_ID);
     let manifest_req = build_get_request(&manifest_uri);
     let _ = app
         .clone()
@@ -504,7 +498,7 @@ async fn test_duplicate_chunk_request_idempotent() {
         .expect("Failed to get manifest");
 
     // Request same chunk twice
-    let chunk_uri = format!("/send/{}/0/chunk/0?clientId={}", session.token(), CLIENT_ID);
+    let chunk_uri = format!("/send/{}/0/chunk/0?clientId={}", state.session.token(), CLIENT_ID);
 
     let request1 = build_get_request(&chunk_uri);
     let response1 = app
@@ -531,11 +525,11 @@ async fn test_last_chunk_partial_size() {
     let file_data = vec![0xCC; CHUNK_SIZE * 2 + CHUNK_SIZE / 2];
     let paths = create_test_files(&temp_dir, vec![("partial.bin", &file_data)]).await;
 
-    let (app, session, _) = create_test_send_app(paths, key.clone()).await;
+    let (app, state, _) = create_test_send_app(paths, key.clone()).await;
     let cipher = create_cipher(&key);
 
     // Claim session and get nonce
-    let manifest_uri = format!("/send/{}/manifest?clientId={}", session.token(), CLIENT_ID);
+    let manifest_uri = format!("/send/{}/manifest?clientId={}", state.session.token(), CLIENT_ID);
     let manifest_req = build_get_request(&manifest_uri);
     let manifest_resp = app
         .clone()
@@ -547,7 +541,7 @@ async fn test_last_chunk_partial_size() {
     let file_nonce = Nonce::from_base64(file_nonce_str).unwrap();
 
     // Request last chunk (chunk 2)
-    let chunk_uri = format!("/send/{}/0/chunk/2?clientId={}", session.token(), CLIENT_ID);
+    let chunk_uri = format!("/send/{}/0/chunk/2?clientId={}", state.session.token(), CLIENT_ID);
     let request = build_get_request(&chunk_uri);
     let response = app.oneshot(request).await.expect("Failed to send request");
 
