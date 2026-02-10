@@ -1,23 +1,31 @@
+//! Session authentication and lock lifecycle primitives.
+
 use crate::crypto::types::EncryptionKey;
 use aws_lc_rs::aead::{LessSafeKey, UnboundKey, AES_256_GCM};
 use std::sync::{Arc, RwLock};
 use uuid::Uuid;
 
-/// Validates that client_id is not empty or whitespace-only
-fn validate_client_id(client_id: &str) -> bool {
-    !client_id.trim().is_empty()
+fn generate_lock_token() -> String {
+    Uuid::new_v4().to_string()
 }
 
-/// First-come-first-served session locking.
-#[derive(Debug, Clone)]
-pub enum SessionState {
-    Unclaimed,
-    Active { client_id: String },
+/// Reasons a session claim can be rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimError {
+    InvalidToken,
+    AlreadyClaimed,
     Completed,
 }
 
-/// Shared session infrastructure
-/// For cypto and auth
+/// Session lock state machine for transfer ownership.
+#[derive(Debug, Clone)]
+pub enum SessionState {
+    Unclaimed,
+    Active { lock_token: String },
+    Completed,
+}
+
+/// Shared session context containing auth token, encryption key, cipher, and lock state.
 pub struct Session {
     token: String,
     session_key: EncryptionKey,
@@ -26,6 +34,7 @@ pub struct Session {
 }
 
 impl Session {
+    /// Creates a new session with fresh token, key-backed cipher, and unclaimed state.
     pub fn new(session_key: EncryptionKey) -> Self {
         let token = Uuid::new_v4().to_string();
 
@@ -61,25 +70,16 @@ impl Session {
 
     //-- Session lock logic
 
-    /// Claims unclaimed session or validates existing claim. Rejects empty client_ids.
-    pub fn claim(&self, token: &str, client_id: &str) -> bool {
+    /// Claims an unclaimed session and returns the server-issued lock token.
+    pub fn claim(&self, token: &str) -> Result<String, ClaimError> {
         if token != self.token {
             tracing::warn!(
                 "Session claim rejected: token mismatch (expected: '{}', got: '{}')",
                 self.token,
                 token
             );
-            return false;
+            return Err(ClaimError::InvalidToken);
         }
-
-        // Validate client_id - reject empty or whitespace-only
-        if !validate_client_id(client_id) {
-            tracing::warn!("Session claim rejected: empty client_id");
-            return false;
-        }
-
-        // Convert for storage in SessionState::Active
-        let client_id_owned = client_id.to_string();
 
         // Try to claim
         let mut state = match self.state.write() {
@@ -91,38 +91,25 @@ impl Session {
         };
         match &*state {
             SessionState::Unclaimed => {
-                tracing::debug!("Session claimed by client: {}", client_id);
+                let lock_token = generate_lock_token();
+                tracing::debug!("Session claimed");
                 *state = SessionState::Active {
-                    client_id: client_id_owned,
+                    lock_token: lock_token.clone(),
                 };
-                true
+                Ok(lock_token)
             }
-            SessionState::Active {
-                client_id: stored_id,
-            } => {
-                // Session is already claimed: Check if the client IDs match
-                let matches = stored_id == client_id;
-                if !matches {
-                    tracing::warn!(
-                        "Session access denied: expected client_id '{}', got '{}'",
-                        stored_id,
-                        client_id
-                    );
-                }
-                matches
-            }
-            SessionState::Completed => false,
+            SessionState::Active { .. } => Err(ClaimError::AlreadyClaimed),
+            SessionState::Completed => Err(ClaimError::Completed),
         }
     }
 
-    pub fn is_active(&self, token: &str, client_id: &str) -> bool {
+    /// Returns true only when both session token and lock token match active state.
+    pub fn is_active(&self, token: &str, lock_token: &str) -> bool {
         if token != self.token {
             return false;
         }
 
-        // Validate client_id - reject empty or whitespace-only
-        if !validate_client_id(client_id) {
-            tracing::warn!("Session active check rejected: empty client_id");
+        if lock_token.trim().is_empty() {
             return false;
         }
 
@@ -134,15 +121,14 @@ impl Session {
             }
         };
         match &*state {
-            SessionState::Active {
-                client_id: stored_id,
-            } => stored_id == client_id,
+            SessionState::Active { lock_token: active } => active == lock_token,
             _ => false,
         }
     }
 
-    pub fn complete(&self, token: &str, client_id: &str) -> bool {
-        if !self.is_active(token, client_id) {
+    /// Marks session completed when caller holds valid active ownership tokens.
+    pub fn complete(&self, token: &str, lock_token: &str) -> bool {
+        if !self.is_active(token, lock_token) {
             return false;
         }
 
@@ -153,11 +139,12 @@ impl Session {
                 poisoned.into_inner()
             }
         };
-        tracing::info!("Session completed by client: {}", client_id);
+        tracing::info!("Session completed");
         *state = SessionState::Completed;
         true
     }
 
+    /// Returns true when session has entered terminal completed state.
     pub fn is_completed(&self) -> bool {
         let state = match self.state.read() {
             Ok(guard) => guard,
@@ -183,4 +170,3 @@ impl Clone for Session {
         }
     }
 }
-

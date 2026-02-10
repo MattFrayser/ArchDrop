@@ -1,23 +1,39 @@
 use crate::common::config::TransferSettings;
 use crate::common::{manifest::FileEntry, Manifest, Session, TransferState};
 use crate::crypto::types::EncryptionKey;
+use crate::send::buffer_pool::BufferPool;
 use crate::send::file_handle::SendFileHandle;
 use crate::server::progress::ProgressTracker;
 use dashmap::DashMap;
+use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-/// Send-specific application state
-/// Passed to all send handlers via Axum State extractor
+#[derive(Clone)]
 pub struct SendAppState {
+    inner: Arc<SendAppStateInner>,
+}
+
+/// Send-specific application state
+/// Stored once behind Arc and cloned cheaply by handlers/router.
+pub struct SendAppStateInner {
     pub session: Session,
     pub manifest: Manifest,
     pub progress: Arc<ProgressTracker>,
     pub file_handles: Arc<DashMap<usize, Arc<SendFileHandle>>>,
+    pub buffer_pool: Arc<BufferPool>,
     pub config: TransferSettings,
     chunks_sent: Arc<AtomicU64>,
     sent_chunks: Arc<DashMap<(usize, usize), ()>>,
-    total_chunks: AtomicU64,
+    total_chunks: Arc<AtomicU64>,
+}
+
+impl Deref for SendAppState {
+    type Target = SendAppStateInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
 }
 
 impl SendAppState {
@@ -28,15 +44,22 @@ impl SendAppState {
         progress: Arc<ProgressTracker>,
         config: TransferSettings,
     ) -> Self {
+        // +16 bytes for AES-GCM tag appended during encrypt_in_place
+        let buf_capacity = config.chunk_size as usize + 16;
+        let pool_size = config.concurrency;
+
         Self {
-            session: Session::new(session_key),
-            manifest,
-            progress,
-            file_handles: Arc::new(DashMap::new()),
-            config,
-            chunks_sent: Arc::new(AtomicU64::new(0)),
-            sent_chunks: Arc::new(DashMap::new()),
-            total_chunks: AtomicU64::new(total_chunks),
+            inner: Arc::new(SendAppStateInner {
+                session: Session::new(session_key),
+                manifest,
+                progress,
+                file_handles: Arc::new(DashMap::new()),
+                buffer_pool: BufferPool::new(pool_size, buf_capacity),
+                config,
+                chunks_sent: Arc::new(AtomicU64::new(0)),
+                sent_chunks: Arc::new(DashMap::new()),
+                total_chunks: Arc::new(AtomicU64::new(total_chunks)),
+            }),
         }
     }
 
@@ -77,21 +100,6 @@ impl SendAppState {
     }
 }
 
-impl Clone for SendAppState {
-    fn clone(&self) -> Self {
-        Self {
-            session: self.session.clone(),
-            manifest: self.manifest.clone(),
-            progress: self.progress.clone(),
-            file_handles: self.file_handles.clone(),
-            config: self.config.clone(),
-            chunks_sent: self.chunks_sent.clone(),
-            sent_chunks: self.sent_chunks.clone(),
-            total_chunks: AtomicU64::new(self.total_chunks.load(Ordering::SeqCst)),
-        }
-    }
-}
-
 #[async_trait::async_trait]
 impl TransferState for SendAppState {
     fn transfer_count(&self) -> usize {
@@ -117,4 +125,37 @@ impl TransferState for SendAppState {
     fn is_receiving(&self) -> bool {
         false
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::config::TransferSettings;
+
+    #[test]
+    fn clone_shares_total_chunks_atomic() {
+        let state = SendAppState::new(
+            EncryptionKey::new(),
+            Manifest {
+                files: Vec::new(),
+                config: TransferSettings {
+                    chunk_size: 1024,
+                    concurrency: 1,
+                },
+            },
+            3,
+            Arc::new(ProgressTracker::new()),
+            TransferSettings {
+                chunk_size: 1024,
+                concurrency: 1,
+            },
+        );
+
+        let cloned = state.clone();
+
+        state.total_chunks.store(9, Ordering::SeqCst);
+
+        assert_eq!(cloned.get_total_chunks(), 9);
+    }
+
 }

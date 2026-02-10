@@ -1,11 +1,13 @@
 use crate::common::config::{AppConfig, Transport};
 use crate::common::TransferState;
 use crate::crypto::types::Nonce;
+use crate::server::progress::ProgressTracker;
 use crate::server::ServerInstance;
 use crate::transport::local::{get_local_ip, start_local_server, BindScope, Protocol};
 use crate::transport::tunnel::Tunnel;
 use crate::ui::tui::{generate_qr, spawn_tui, spinner, spinner_error, spinner_success, TuiConfig};
 use anyhow::{Context, Result};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -13,20 +15,40 @@ pub async fn start_https<S: TransferState>(
     server: ServerInstance,
     app_state: S,
     nonce: Nonce,
+    transport: Transport,
+    config: &AppConfig,
+    tracker: Arc<ProgressTracker>,
 ) -> Result<u16> {
     let service = app_state.service_path();
+    let ServerInstance { app, display_name } = server;
 
-    // Clone needed before consuming server
-    let display_name = server.display_name.clone();
-    let progress_receiver = server.progress_receiver();
-
-    let (port, server_handle) = start_local_server(server, Protocol::Https).await?;
+    let local_server_spinner = spinner("Starting local HTTPS server...");
+    let (port, server_handle) = match start_local_server(
+        app,
+        Protocol::Https,
+        BindScope::AllInterfaces,
+        config.port(transport),
+    )
+    .await
+    {
+        Ok(result) => {
+            spinner_success(
+                &local_server_spinner,
+                &format!("Local HTTPS server ready on port {}", result.0),
+            );
+            result
+        }
+        Err(err) => {
+            spinner_error(&local_server_spinner, "Failed to start local HTTPS server");
+            return Err(err);
+        }
+    };
 
     // Use local IP instead of localhost for network access
     let local_ip = get_local_ip().unwrap_or_else(|_| "127.0.0.1".to_string());
     let base_url = format!("https://{}:{}", local_ip, port);
     let url = format!(
-        "{}/{}/{}#key={}&nonce={}",
+        "{}/{}#token={}&key={}&nonce={}",
         base_url,
         service,
         app_state.session().token(),
@@ -41,8 +63,10 @@ pub async fn start_https<S: TransferState>(
         app_state,
         None,
         display_name,
-        progress_receiver,
+        tracker,
         url,
+        transport,
+        config,
     )
     .await?;
     Ok(port)
@@ -52,24 +76,56 @@ pub async fn start_tunnel<S: TransferState>(
     server: ServerInstance,
     app_state: S,
     nonce: Nonce,
+    transport: Transport,
+    config: &AppConfig,
+    tracker: Arc<ProgressTracker>,
 ) -> Result<u16> {
     let service = app_state.service_path();
+    let ServerInstance { app, display_name } = server;
 
-    // Clone what we need before consuming server
-    let display_name = server.display_name.clone();
-    let progress_receiver = server.progress_receiver();
+    let local_server_spinner = spinner("Starting local HTTP server...");
+    let (port, server_handle) = match start_local_server(
+        app,
+        Protocol::Http,
+        BindScope::Loopback,
+        config.port(transport),
+    )
+    .await
+    {
+        Ok(result) => {
+            spinner_success(
+                &local_server_spinner,
+                &format!("Local HTTP server ready on port {}", result.0),
+            );
+            result
+        }
+        Err(err) => {
+            spinner_error(&local_server_spinner, "Failed to start local HTTP server");
+            return Err(err);
+        }
+    };
 
-    let (port, server_handle) = start_local_server(server, Protocol::Http).await?;
+    let tunnel_spinner = spinner(match transport {
+        Transport::Cloudflare => "Starting Cloudflare tunnel...",
+        Transport::Tailscale => "Starting Tailscale tunnel...",
+        Transport::Local => "Starting tunnel...",
+    });
 
-    // Start tunnel
-    let tunnel = CloudflareTunnel::start(port)
-        .await
-        .context("Failed to establish Cloudflare tunnel")?;
+    let tunnel = match Tunnel::start(transport, port).await {
+        Ok(tunnel) => {
+            spinner_success(&tunnel_spinner, "Tunnel established");
+            tunnel
+        }
+        Err(err) => {
+            spinner_error(&tunnel_spinner, "Failed to establish tunnel");
+            return Err(err);
+        }
+    };
 
     // Ensure tunnel URL doesn't have trailing slash
     let tunnel_url = tunnel.url().trim_end_matches('/');
     let url = format!(
-        "{}/{}/{}#key={}&nonce={}",
+        "{}/{}#token={}&key={}&nonce={}",
         tunnel_url,
         service,
         app_state.session().token(),
@@ -83,115 +139,104 @@ pub async fn start_tunnel<S: TransferState>(
         app_state,
         Some(tunnel),
         display_name,
-        progress_receiver,
+        tracker,
         url,
+        transport,
+        config,
     )
     .await?;
 
     Ok(port)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_session<S: TransferState>(
     server_handle: axum_server::Handle,
     state: S,
-    mut tunnel: Option<CloudflareTunnel>,
+    mut tunnel: Option<Tunnel>,
     display_name: String,
-    progress_receiver: tokio::sync::watch::Receiver<f64>,
+    tracker: Arc<ProgressTracker>,
     url: String,
+    transport: Transport,
+    config: &AppConfig,
 ) -> Result<()> {
-    // CancellationTokens
+    // CancellationToken for TUI / main loop
     let root_token = CancellationToken::new();
     let tui_token = root_token.child_token();
-    let shutdown_token = root_token.child_token();
 
     // TUI msgs
     let (status_sender, status_receiver) = tokio::sync::watch::channel(None);
 
     // Spawn TUI (can be disabled with NO_TUI=1 for debugging)
     let tui_handle = if std::env::var("NO_TUI").is_ok() {
-        // No TUI mode - just print URL and wait
+        // No TUI mode - poll tracker for completion
         println!("TUI disabled. Press Ctrl+C to stop.");
         tokio::spawn(async move {
-            // Wait indefinitely until cancelled
-            tui_token.cancelled().await;
+            loop {
+                tokio::select! {
+                    _ = tui_token.cancelled() => break,
+                    _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                        if tracker.snapshot().is_complete() {
+                            break;
+                        }
+                    }
+                }
+            }
+            Ok(())
         })
     } else {
         let qr_code = generate_qr(&url)?;
-        spawn_tui(
-            progress_receiver,
-            display_name,
+        let tui_config = TuiConfig {
+            is_receiving: state.is_receiving(),
+            transport,
+            url,
             qr_code,
-            state.is_receiving(),
-            status_receiver,
-            tui_token.clone(),
-        )
+            display_name,
+            show_qr: config.tui.show_qr,
+            show_url: config.tui.show_url,
+        };
+        spawn_tui(tui_config, tracker, status_receiver, tui_token)
     };
 
-    // Spawn Ctrl+C handler with two-stage loop
+    // Spawn Ctrl+C handler — cancels root_token on first Ctrl+C
     let signal_token = root_token.clone();
-    let signal_status_sender = status_sender.clone();
-    let signal_state = state.clone();
-
     let ctrl_c_task = tokio::spawn(async move {
-        // Wait for first Ctrl+C
         if tokio::signal::ctrl_c().await.is_err() {
             tracing::error!("Failed to listen for Ctrl+C");
             return;
         }
-
         tracing::info!("Ctrl+C received - initiating graceful shutdown");
-
-        // Check if there are active transfers
-        let active_count = signal_state.transfer_count();
-
-        if active_count > 0 {
-            let _ = signal_status_sender.send(Some(format!(
-                "Shutting down... {} transfer(s) in progress - Press Ctrl+C again to force quit",
-                active_count
-            )));
-        }
-        // Cancel all tasks gracefully
         signal_token.cancel();
-
-        // second Ctrl+C for immediate shutdown
-        if tokio::signal::ctrl_c().await.is_ok() {
-            tracing::warn!("Second Ctrl+C - forcing immediate shutdown");
-            // Token already cancelled
-            // let runtime clean up
-        }
     });
 
-    //  wait for complete or cancel
+    // Wait for transfer completion or Ctrl+C
     tokio::select! {
         result = tui_handle => {
             tracing::info!("Transfer completed successfully");
-            result.context("TUI task failed")?;
-            ShutdownResult::Completed
+            let _ = result.context("TUI task failed")?;
         }
-        _ = shutdown_token.cancelled() => {
-            ShutdownResult::Forced
-        }
+        _ = root_token.cancelled() => {}
     };
 
-    // cleanup
+    // Cleanup
 
-    // Ensure all tokens are cancelled
+    // Ensure TUI stops
     root_token.cancel();
 
     // Shutdown tunnel if it exists
     if let Some(ref mut t) = tunnel {
-        tracing::debug!("Shutting down cloudflared tunnel...");
+        tracing::debug!("Shutting down tunnel...");
         if let Err(e) = t.shutdown().await {
             tracing::warn!("Error during tunnel shutdown: {}", e);
         }
     }
 
-    // Wait for signal handler to finish (should be quick)
-    ctrl_c_task.abort(); // It's ok to abort this one - it's just listening
+    // Stop the first-stage signal handler before shutdown installs its own
+    ctrl_c_task.abort();
     let _ = ctrl_c_task.await;
 
-    // Shutdown server and wait for transfers
-    shutdown(server_handle, state, shutdown_token, status_sender).await?;
+    // Shutdown server and drain active transfers
+    shutdown(server_handle, state, status_sender).await?;
 
     Ok(())
 }
@@ -208,15 +253,18 @@ enum ShutdownResult {
 async fn shutdown<S: TransferState>(
     server_handle: axum_server::Handle,
     state: S,
-    cancel_token: CancellationToken,
     status_sender: tokio::sync::watch::Sender<Option<String>>,
 ) -> Result<()> {
     // Stop accepting new connections
     server_handle.shutdown();
     tracing::info!("Server stopped accepting new connections");
 
-    // Wait for active transfers to complete
-    let result = wait_for_transfers(&state, cancel_token, status_sender.clone()).await;
+    // Wait for in-flight transfers to finish (Ctrl+C to force quit)
+    let result = if state.session().is_completed() {
+        ShutdownResult::Completed
+    } else {
+        wait_for_transfers(&state, &status_sender).await
+    };
 
     // Clear status message before final cleanup
     let _ = status_sender.send(None);
@@ -240,30 +288,33 @@ async fn shutdown<S: TransferState>(
 
 async fn wait_for_transfers<S: TransferState>(
     state: &S,
-    cancel_token: CancellationToken,
-    status_sender: tokio::sync::watch::Sender<Option<String>>,
+    status_sender: &tokio::sync::watch::Sender<Option<String>>,
 ) -> ShutdownResult {
+    // Already done — no need to wait
+    if state.transfer_count() == 0 {
+        return ShutdownResult::Completed;
+    }
+
     let mut last_count = state.transfer_count();
 
     loop {
-        // Wait for cancellation OR timeout
         tokio::select! {
-            // Cancellation requested (second Ctrl+C)
-            _ = cancel_token.cancelled() => {
-                tracing::info!("Force shutdown requested");
-                return ShutdownResult::Forced;
+            // Ctrl+C during drain = force quit
+            result = tokio::signal::ctrl_c() => {
+                if result.is_ok() {
+                    tracing::info!("Force shutdown requested");
+                    return ShutdownResult::Forced;
+                }
             }
 
-            // Check transfer status periodically
+            // Poll transfer status
             _ = tokio::time::sleep(Duration::from_millis(500)) => {
                 let current_count = state.transfer_count();
 
-                // All transfers complete
                 if current_count == 0 {
                     return ShutdownResult::Completed;
                 }
 
-                // Show progress if count changed
                 if current_count != last_count {
                     tracing::info!("{} transfer(s) remaining...", current_count);
                     let _ = status_sender.send(Some(format!(

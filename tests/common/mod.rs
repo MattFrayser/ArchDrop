@@ -1,12 +1,13 @@
 #![allow(dead_code)]
 
+pub mod config_test_utils;
+
 use archdrop::common::TransferSettings;
 use archdrop::crypto::types::EncryptionKey;
 use aws_lc_rs::aead::{LessSafeKey, UnboundKey, AES_256_GCM};
 use tempfile::TempDir;
 
 pub const CHUNK_SIZE: usize = 10 * 1024 * 1024; // 10MB
-pub const CLIENT_ID: &str = "test-client-123";
 
 pub fn default_config() -> TransferSettings {
     TransferSettings {
@@ -20,7 +21,6 @@ pub fn setup_temp_dir() -> TempDir {
 }
 
 pub fn create_cipher(key: &EncryptionKey) -> LessSafeKey {
-    let unbound = UnboundKey::new(&AES_256_GCM, key.as_bytes())
-        .expect("valid 32-byte AES-256 key");
+    let unbound = UnboundKey::new(&AES_256_GCM, key.as_bytes()).expect("valid 32-byte AES-256 key");
     LessSafeKey::new(unbound)
 }

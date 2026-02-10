@@ -1,12 +1,6 @@
-use std::sync::Arc;
+//! HTTP handlers for manifest, chunk, and completion endpoints.
 
-use crate::common::{AppError, Manifest};
-use crate::crypto::{self, Nonce};
-use crate::send::buffer_pool::BufferPool;
-use crate::send::file_handle::SendFileHandle;
-use crate::server::auth::{self, ClientIdParam};
 use anyhow::{Context, Result};
-use axum::extract::Query;
 use axum::{
     body::Body,
     extract::{Path, State},
@@ -15,24 +9,33 @@ use axum::{
 };
 use bytes::Bytes;
 use reqwest::header;
+use std::sync::Arc;
+
+use crate::common::AppError;
+use crate::crypto::{self, Nonce};
+use crate::send::buffer_pool::BufferPool;
+use crate::send::file_handle::SendFileHandle;
+use crate::server::auth::{self, BearerToken, LockToken};
 
 use super::SendAppState;
 
-#[derive(serde::Deserialize)]
-pub struct ChunkParams {
-    #[serde(rename = "clientId")]
-    client_id: String,
+/// Manifest payload plus lock token for authenticated chunk requests.
+#[derive(serde::Serialize)]
+pub struct SendManifestResponse {
+    #[serde(flatten)]
+    manifest: crate::common::Manifest,
+    #[serde(rename = "lockToken")]
+    lock_token: String,
 }
 
-// Client will use manifest to know what it is downloading
+/// Claim the session and return the transfer manifest.
 pub async fn manifest_handler(
-    Path(token): Path<String>,
-    Query(params): Query<ClientIdParam>,
+    BearerToken(token): BearerToken,
     State(state): State<SendAppState>,
-) -> Result<Json<Manifest>, AppError> {
+) -> Result<Json<SendManifestResponse>, AppError> {
     // Session claimed when fetching manifest
     // Manifests holds info about files (sizes, names) only client should see
-    auth::claim_or_validate_session(&state.session, &token, &params.client_id)?;
+    let lock_token = auth::claim_session(&state.session, &token)?;
 
     // Get manifest from session
     let manifest = state.manifest();
@@ -46,17 +49,20 @@ pub async fn manifest_handler(
         .collect();
     state.progress.init_files(names, totals);
 
-    Ok(Json(manifest.clone()))
+    Ok(Json(SendManifestResponse {
+        manifest: manifest.clone(),
+        lock_token,
+    }))
 }
 
+/// Serve one encrypted chunk for a file index/chunk index pair.
 pub async fn send_handler(
-    Path((token, file_index, chunk_index)): Path<(String, usize, usize)>,
-    Query(params): Query<ChunkParams>,
+    BearerToken(token): BearerToken,
+    LockToken(lock_token): LockToken,
+    Path((file_index, chunk_index)): Path<(usize, usize)>,
     State(state): State<SendAppState>,
 ) -> Result<Response<Body>, AppError> {
-    // Sessions are claimed by manifest, so just check client
-    let client_id = &params.client_id;
-    auth::require_active_session(&state.session, &token, client_id)?;
+    auth::require_active_session(&state.session, &token, &lock_token)?;
 
     let file_entry = state
         .get_file(file_index)
@@ -77,7 +83,7 @@ pub async fn send_handler(
         .entry(file_index)
         .or_try_insert_with(|| -> Result<Arc<SendFileHandle>> {
             Ok(Arc::new(SendFileHandle::open(
-                file_entry.full_path.clone(),
+                &file_entry.full_path,
                 file_entry.size,
             )?))
         })?
@@ -101,6 +107,7 @@ pub async fn send_handler(
         .context("build response")?)
 }
 
+/// Read, encrypt, and return a single chunk payload.
 async fn process_chunk(
     file_handle: &Arc<SendFileHandle>,
     chunk_index: usize,
@@ -132,23 +139,40 @@ async fn process_chunk(
     // Read + encrypt in a single blocking task to avoid double thread-pool scheduling
     tokio::task::spawn_blocking(move || {
         let mut buffer = pool.take();
+
+        let read_start = std::time::Instant::now();
         file_handle.read_chunk(start, chunk_len, &mut buffer)?;
+        tracing::debug!(
+            chunk_index,
+            bytes = chunk_len,
+            elapsed_us = read_start.elapsed().as_micros() as u64,
+            "chunk_read"
+        );
+
         let file_nonce = Nonce::from_base64(&nonce_str)?;
+
+        let encrypt_start = std::time::Instant::now();
         crypto::encrypt_chunk_in_place(&cipher, &file_nonce, &mut buffer, chunk_index as u32)
             .context("Encryption failed")?;
+        tracing::debug!(
+            chunk_index,
+            bytes = buffer.len(),
+            elapsed_us = encrypt_start.elapsed().as_micros() as u64,
+            "chunk_encrypt"
+        );
+
         // Wrap in Bytes that returns the buffer to the pool on drop
         Ok(pool.wrap(buffer))
     })
     .await?
 }
 
+/// Mark the transfer complete (idempotent for client retries).
 pub async fn complete_download(
-    Path(token): Path<String>,
-    Query(params): Query<ChunkParams>,
+    BearerToken(token): BearerToken,
+    LockToken(lock_token): LockToken,
     State(state): State<SendAppState>,
 ) -> Result<axum::Json<serde_json::Value>, AppError> {
-    let client_id = &params.client_id;
-
     // If the session is ALREADY completed, return 200 OK.
     // Handles the client retrying on network failure.
     // file_complete is idempotent so no need to re-signal progress.
@@ -160,7 +184,7 @@ pub async fn complete_download(
     }
 
     // Session must be active and owned to complete
-    auth::require_active_session(&state.session, &token, client_id)?;
+    auth::require_active_session(&state.session, &token, &lock_token)?;
 
     let chunks_sent = state.get_chunks_sent();
     let total_chunks = state.get_total_chunks();
@@ -175,7 +199,7 @@ pub async fn complete_download(
         );
     }
 
-    state.session.complete(&token, client_id);
+    state.session.complete(&token, &lock_token);
     mark_all_files_complete(&state);
 
     Ok(axum::Json(serde_json::json!({

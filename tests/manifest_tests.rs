@@ -1,9 +1,8 @@
 mod common;
 
-use common::default_config;
-use archdrop::common::TransferConfig;
 use archdrop::common::Manifest;
 use base64::Engine;
+use common::default_config;
 use tempfile::TempDir;
 
 #[tokio::test]
@@ -70,9 +69,13 @@ async fn test_manifest_with_subdirectory() {
     let file_in_subdir = sub_dir.join("nested.txt");
     std::fs::write(&file_in_subdir, b"nested content").unwrap();
 
-    let manifest = Manifest::new(vec![file_in_subdir.clone()], Some(temp_dir.path()), default_config())
-        .await
-        .expect("Manifest creation should succeed");
+    let manifest = Manifest::new(
+        vec![file_in_subdir.clone()],
+        Some(temp_dir.path()),
+        default_config(),
+    )
+    .await
+    .expect("Manifest creation should succeed");
 
     assert_eq!(manifest.files.len(), 1);
     assert_eq!(manifest.files[0].name, "nested.txt");

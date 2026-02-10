@@ -1,56 +1,53 @@
 use sha2::{Digest, Sha256};
-use std::fmt;
 use std::path::{Component, Path};
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum ValidationError {
+    #[error("Path contains parent directory (..)")]
+    ContainsParentDir,
+
+    #[error("File path is absolute")]
+    AbsolutePath,
+
+    #[error("File path contains invalid component")]
+    InvalidComponent,
+
+    #[error("File path contains null byte")]
+    NullByte,
+
+    #[error("File path is empty")]
+    Empty,
+
+    #[error("Filename contains directory separator")]
+    ContainsDirectorySeparator,
+}
 
 //===============
 // Path Handling
 //===============
-#[derive(Debug)]
-pub enum PathValidationError {
-    ContainsParentDir,
-    AbsolutePath,
-    InvalidComponent,
-    NullByte,
-    Empty,
-}
 
-impl fmt::Display for PathValidationError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            PathValidationError::ContainsParentDir => {
-                write!(f, "Path contains parent directory (..)")
-            }
-            PathValidationError::AbsolutePath => write!(f, "Path is absolute"),
-            PathValidationError::InvalidComponent => write!(f, "Path contains invalid component"),
-            PathValidationError::NullByte => write!(f, "Path contains null byte"),
-            PathValidationError::Empty => write!(f, "Path is empty"),
-        }
-    }
-}
-
-impl std::error::Error for PathValidationError {}
-
-// hash path for safe directory name
+/// Hash path for safe directory name
 pub fn hash_path(path: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(path.as_bytes());
 
-    // using first 16 chars (64 bits) for shorter directory names
-    // with 16 still HIGHLY unlikely to collide
+    // first 16 chars (64 bits) for shorter directory names
+    // 16 still HIGHLY unlikely to collide
     format!("{:x}", hasher.finalize())[..16].to_string()
 }
 
 // Core validation logic shared by both validate_path and validate_filename
 // Checks for: empty strings, null bytes, parent directory traversal, absolute paths
-fn validate_path_components(path_str: &str) -> Result<(), PathValidationError> {
+fn validate_path_components(path_str: &str) -> Result<(), ValidationError> {
     if path_str.is_empty() {
-        return Err(PathValidationError::Empty);
+        return Err(ValidationError::Empty);
     }
 
     // null bytes
     // rust uses C-style APIs so \0 can end str early
     if path_str.contains('\0') {
-        return Err(PathValidationError::NullByte);
+        return Err(ValidationError::NullByte);
     }
 
     let path = Path::new(path_str);
@@ -59,35 +56,32 @@ fn validate_path_components(path_str: &str) -> Result<(), PathValidationError> {
     for component in path.components() {
         match component {
             Component::Normal(_) => continue,
-            Component::ParentDir => return Err(PathValidationError::ContainsParentDir),
-            Component::RootDir => return Err(PathValidationError::AbsolutePath),
+            Component::ParentDir => return Err(ValidationError::ContainsParentDir),
+            Component::RootDir => return Err(ValidationError::AbsolutePath),
             Component::CurDir => continue, // "./" is okay, just redundant
-            Component::Prefix(_) => return Err(PathValidationError::InvalidComponent), // Windows
+            Component::Prefix(_) => return Err(ValidationError::InvalidComponent), // Windows
         }
     }
 
     Ok(())
 }
 
-// Validate paths are safe to use
-// Used for receiving.
-// Since receive is writing entire path should be checked
+// Validate paths are safe to use ( used for receiving.)
 // no: parent dir travel, absolute paths, null bytes
-pub fn validate_path(path: &str) -> Result<(), PathValidationError> {
-    validate_path_components(path)?;
+pub fn validate_path(path: &str) -> Result<(), ValidationError> {
+    validate_path_components(path)
+}
 
-    // Additional check: reject absolute paths upfront
-    if Path::new(path).is_absolute() {
-        return Err(PathValidationError::AbsolutePath);
+// Validate proper filename (Used for send)
+// no: dir seperators
+pub fn validate_filename(filename: &str) -> Result<(), ValidationError> {
+    validate_path_components(filename)?;
+
+    if filename.contains('/') || filename.contains('\\') {
+        return Err(ValidationError::ContainsDirectorySeparator);
     }
 
     Ok(())
-}
-
-// Used for send
-// Only sending files so just the name should be valid
-pub fn validate_filename(filename: &str) -> Result<(), PathValidationError> {
-    validate_path_components(filename)
 }
 
 #[cfg(test)]
@@ -100,19 +94,19 @@ mod tests {
         // Direct parent directory traversal
         assert!(matches!(
             validate_filename("../etc/passwd"),
-            Err(PathValidationError::ContainsParentDir)
+            Err(ValidationError::ContainsParentDir)
         ));
 
         // Nested parent directory traversal
         assert!(matches!(
             validate_filename("dir/../../../etc/passwd"),
-            Err(PathValidationError::ContainsParentDir)
+            Err(ValidationError::ContainsParentDir)
         ));
 
         // Multiple parent dirs
         assert!(matches!(
             validate_filename("../../secrets.txt"),
-            Err(PathValidationError::ContainsParentDir)
+            Err(ValidationError::ContainsParentDir)
         ));
     }
 
@@ -121,19 +115,19 @@ mod tests {
         // Unix absolute path
         assert!(matches!(
             validate_filename("/etc/passwd"),
-            Err(PathValidationError::AbsolutePath)
+            Err(ValidationError::AbsolutePath)
         ));
 
         // Another Unix absolute path
         assert!(matches!(
             validate_filename("/home/user/file.txt"),
-            Err(PathValidationError::AbsolutePath)
+            Err(ValidationError::AbsolutePath)
         ));
 
         // Root only
         assert!(matches!(
             validate_filename("/"),
-            Err(PathValidationError::AbsolutePath)
+            Err(ValidationError::AbsolutePath)
         ));
     }
 
@@ -142,52 +136,54 @@ mod tests {
         // Null byte in middle
         assert!(matches!(
             validate_filename("file\0.txt"),
-            Err(PathValidationError::NullByte)
+            Err(ValidationError::NullByte)
         ));
 
         // Null byte used to hide path traversal
         assert!(matches!(
             validate_filename("normal\0../etc/passwd"),
-            Err(PathValidationError::NullByte)
+            Err(ValidationError::NullByte)
         ));
 
         // Null byte at end
         assert!(matches!(
             validate_filename("file.txt\0"),
-            Err(PathValidationError::NullByte)
+            Err(ValidationError::NullByte)
         ));
     }
 
     #[test]
     fn test_validate_filename_empty() {
         // Empty string should be rejected
+        assert!(matches!(validate_filename(""), Err(ValidationError::Empty)));
+    }
+
+    #[test]
+    fn test_validate_filename_rejects_directory_separators() {
         assert!(matches!(
-            validate_filename(""),
-            Err(PathValidationError::Empty)
+            validate_filename("dir/file.txt"),
+            Err(ValidationError::ContainsDirectorySeparator)
+        ));
+        assert!(matches!(
+            validate_filename("dir/subdir/file.txt"),
+            Err(ValidationError::ContainsDirectorySeparator)
+        ));
+        assert!(matches!(
+            validate_filename("./file.txt"),
+            Err(ValidationError::ContainsDirectorySeparator)
+        ));
+        assert!(matches!(
+            validate_filename("dir\\file.txt"),
+            Err(ValidationError::ContainsDirectorySeparator)
         ));
     }
 
     #[test]
-    fn test_validate_filename_valid_paths() {
-        // Simple filename
+    fn test_validate_filename_valid() {
         assert!(validate_filename("file.txt").is_ok());
-
-        // Filename with subdirectory
-        assert!(validate_filename("dir/subdir/file.txt").is_ok());
-
-        // Filename with dashes and underscores
         assert!(validate_filename("file-with-dashes_and_underscores.tar.gz").is_ok());
-
-        // Filename with spaces
         assert!(validate_filename("my file.txt").is_ok());
-
-        // Hidden file (starts with dot)
         assert!(validate_filename(".gitignore").is_ok());
-
-        // Current directory (redundant but safe)
-        assert!(validate_filename("./file.txt").is_ok());
-
-        // Multiple extensions
         assert!(validate_filename("archive.tar.gz.gpg").is_ok());
     }
 
@@ -247,11 +243,11 @@ mod tests {
         // These should all fail due to parent directory traversal
         assert!(matches!(
             validate_path("../file.txt"),
-            Err(PathValidationError::ContainsParentDir)
+            Err(ValidationError::ContainsParentDir)
         ));
         assert!(matches!(
             validate_path("dir/../../file.txt"),
-            Err(PathValidationError::ContainsParentDir)
+            Err(ValidationError::ContainsParentDir)
         ));
     }
 
@@ -260,11 +256,11 @@ mod tests {
         // These should fail due to absolute paths
         assert!(matches!(
             validate_path("/etc/passwd"),
-            Err(PathValidationError::AbsolutePath)
+            Err(ValidationError::AbsolutePath)
         ));
         assert!(matches!(
             validate_path("/file.txt"),
-            Err(PathValidationError::AbsolutePath)
+            Err(ValidationError::AbsolutePath)
         ));
     }
 
@@ -273,13 +269,13 @@ mod tests {
         // Should fail due to null byte
         assert!(matches!(
             validate_path("file\0.txt"),
-            Err(PathValidationError::NullByte)
+            Err(ValidationError::NullByte)
         ));
     }
 
     #[test]
     fn test_validate_path_rejects_empty() {
         // Should fail due to empty path
-        assert!(matches!(validate_path(""), Err(PathValidationError::Empty)));
+        assert!(matches!(validate_path(""), Err(ValidationError::Empty)));
     }
 }

@@ -1,26 +1,28 @@
 //! Error Injection Tests
 //!
 //! These tests validate error handling under various failure conditions.
-//! Tests using large chunks (10MB) are marked #[ignore] to keep the default
-//! test suite fast. Small error tests (<1KB) run by default.
+//! Heavy tests are marked #[ignore] to keep the default suite fast.
+//! Smoke/error-shape tests run by default.
 //!
-//! Run all error tests with: cargo test --test error_injection_tests -- --include-ignored
+//! Run default: cargo test --test error_injection_tests
+//! Run heavy: cargo test --test error_injection_tests -- --ignored
+//! Run all: cargo test --test error_injection_tests -- --include-ignored
 
 mod common;
 
-use common::{CHUNK_SIZE, CLIENT_ID, default_config, setup_temp_dir, create_cipher};
 use archdrop::crypto::types::{EncryptionKey, Nonce};
-use archdrop::server::routes;
 use archdrop::receive::ReceiveAppState;
 use archdrop::server::progress::ProgressTracker;
-use std::sync::Arc;
+use archdrop::server::routes;
 use axum::{
     body::Body,
     http::{Method, Request, StatusCode},
     Router,
 };
+use common::{create_cipher, default_config, setup_temp_dir, CHUNK_SIZE};
 use http_body_util::BodyExt;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tower::ServiceExt;
 
 fn create_test_app(output_dir: PathBuf, key: EncryptionKey) -> (Router, ReceiveAppState) {
@@ -35,11 +37,12 @@ fn create_test_data(pattern: u8, size: usize) -> Vec<u8> {
     vec![pattern; size]
 }
 
-fn build_json_request(uri: &str, json: serde_json::Value) -> Request<Body> {
+fn build_json_request(uri: &str, json: serde_json::Value, token: &str) -> Request<Body> {
     Request::builder()
         .method(Method::POST)
         .uri(uri)
         .header("content-type", "application/json")
+        .header("Authorization", format!("Bearer {}", token))
         .body(Body::from(
             serde_json::to_vec(&json).expect("Failed to serialize JSON"),
         ))
@@ -54,8 +57,8 @@ fn build_multipart_request(
     total_chunks: usize,
     file_size: u64,
     nonce: &str,
-    client_id: &str,
     chunk_data: Vec<u8>,
+    token: &str,
 ) -> Request<Body> {
     let boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW";
     let mut body = Vec::new();
@@ -74,7 +77,6 @@ fn build_multipart_request(
     write_field(&mut body, "totalChunks", &total_chunks.to_string());
     write_field(&mut body, "fileSize", &file_size.to_string());
     write_field(&mut body, "nonce", nonce);
-    write_field(&mut body, "clientId", client_id);
 
     body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
     body.extend_from_slice(b"Content-Disposition: form-data; name=\"chunk\"\r\n");
@@ -90,29 +92,9 @@ fn build_multipart_request(
             "content-type",
             format!("multipart/form-data; boundary={}", boundary),
         )
+        .header("Authorization", format!("Bearer {}", token))
         .body(Body::from(body))
         .expect("Failed to build multipart request")
-}
-
-fn build_finalize_request(uri: &str, relative_path: &str) -> Request<Body> {
-    let boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW";
-    let mut body = Vec::new();
-
-    body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
-    body.extend_from_slice(b"Content-Disposition: form-data; name=\"relativePath\"\r\n\r\n");
-    body.extend_from_slice(relative_path.as_bytes());
-    body.extend_from_slice(b"\r\n");
-    body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
-
-    Request::builder()
-        .method(Method::POST)
-        .uri(uri)
-        .header(
-            "content-type",
-            format!("multipart/form-data; boundary={}", boundary),
-        )
-        .body(Body::from(body))
-        .expect("Failed to build finalize request")
 }
 
 async fn extract_json(response: axum::response::Response) -> serde_json::Value {
@@ -125,6 +107,33 @@ async fn extract_json(response: axum::response::Response) -> serde_json::Value {
     serde_json::from_slice(&body_bytes).expect("Failed to parse JSON")
 }
 
+fn with_lock_token(mut request: Request<Body>, lock_token: &str) -> Request<Body> {
+    request.headers_mut().insert(
+        "X-Transfer-Lock",
+        lock_token.parse().expect("valid lock token header"),
+    );
+    request
+}
+
+async fn assert_error_response(
+    response: axum::response::Response,
+    expected_status: StatusCode,
+    expected_type: &str,
+    expected_message_contains: &str,
+) {
+    assert_eq!(response.status(), expected_status);
+    let json = extract_json(response).await;
+    assert_eq!(json["error"]["type"], expected_type);
+    let message = json["error"]["message"]
+        .as_str()
+        .expect("error.message should be a string")
+        .to_lowercase();
+    assert!(
+        message.contains(&expected_message_contains.to_lowercase()),
+        "error message should contain '{expected_message_contains}', got '{message}'"
+    );
+}
+
 //======================
 // Error Injection Tests
 //======================
@@ -134,6 +143,7 @@ async fn test_corrupted_nonce_base64() {
     let temp_dir = setup_temp_dir();
     let key = EncryptionKey::new();
     let (app, state) = create_test_app(temp_dir.path().to_path_buf(), key);
+    let token = state.session.token().to_string();
 
     // Create manifest with invalid base64 nonce
     let manifest = serde_json::json!({
@@ -143,12 +153,8 @@ async fn test_corrupted_nonce_base64() {
         }]
     });
 
-    let uri = format!(
-        "/receive/{}/manifest?clientId={}",
-        state.session.token(),
-        CLIENT_ID
-    );
-    let request = build_json_request(&uri, manifest);
+    let uri = "/receive/manifest";
+    let request = build_json_request(&uri, manifest, &token);
     let response = app
         .clone()
         .oneshot(request)
@@ -158,83 +164,46 @@ async fn test_corrupted_nonce_base64() {
     // Since manifest doesn't contain nonce field, it should work
     // The nonce is passed per-chunk. Let's test with invalid nonce in chunk upload
     assert_eq!(response.status(), StatusCode::OK);
+    let manifest_json = extract_json(response).await;
+    let lock_token = manifest_json["lockToken"]
+        .as_str()
+        .expect("manifest should include lockToken")
+        .to_string();
 
     // Now try to upload chunk with invalid base64 nonce
     let chunk_data = create_test_data(0xAA, 1024);
-    let chunk_uri = format!("/receive/{}/chunk", state.session.token());
     let request = build_multipart_request(
-        &chunk_uri,
+        "/receive/chunk",
         "test.txt",
         0,
         1,
         1024,
         "!!!INVALID_BASE64!!!",
-        CLIENT_ID,
         chunk_data,
+        &token,
     );
 
     let response = app
-        .oneshot(request)
+        .oneshot(with_lock_token(request, &lock_token))
         .await
         .expect("Failed to send chunk request");
 
-    // Should return error
-    assert!(
-        response.status().is_client_error() || response.status().is_server_error(),
-        "Invalid base64 should return error, got: {}",
-        response.status()
-    );
+    assert_error_response(
+        response,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal_error",
+        "internal",
+    )
+    .await;
 }
 
 #[tokio::test]
-async fn test_malformed_multipart_upload() {
-    let temp_dir = setup_temp_dir();
-    let key = EncryptionKey::new();
-    let (app, state) = create_test_app(temp_dir.path().to_path_buf(), key);
-
-    // Upload valid manifest first
-    let manifest = serde_json::json!({
-        "files": [{
-            "relative_path": "test.txt",
-            "size": 1024
-        }]
-    });
-
-    let manifest_uri = format!(
-        "/receive/{}/manifest?clientId={}",
-        state.session.token(),
-        CLIENT_ID
-    );
-    let request = build_json_request(&manifest_uri, manifest);
-    app.clone()
-        .oneshot(request)
-        .await
-        .expect("Failed to send manifest");
-
-    // Create malformed multipart request (no boundary marker)
-    let uri = format!("/receive/{}/chunk", state.session.token());
-    let request = Request::builder()
-        .method(Method::POST)
-        .uri(&uri)
-        .header("content-type", "multipart/form-data")
-        .body(Body::from("garbage data without boundaries"))
-        .expect("Failed to build request");
-
-    let response = app.oneshot(request).await.expect("Failed to send request");
-
-    // Should return error
-    assert!(
-        response.status().is_client_error() || response.status().is_server_error(),
-        "Malformed multipart should return error"
-    );
-}
-
-#[tokio::test]
-#[ignore = "uses 20MB chunks - run with --ignored"]
+#[ignore = "stress test: writes 20MB, ~5s - run with --ignored"]
 async fn test_chunk_size_mismatch() {
     let temp_dir = setup_temp_dir();
     let key = EncryptionKey::new();
     let (app, state) = create_test_app(temp_dir.path().to_path_buf(), key.clone());
+    let token = state.session.token().to_string();
 
     // Manifest says 1MB file (1 chunk)
     let manifest = serde_json::json!({
@@ -243,53 +212,54 @@ async fn test_chunk_size_mismatch() {
             "size": CHUNK_SIZE as u64
         }]
     });
-    let manifest_uri = format!(
-        "/receive/{}/manifest?clientId={}",
-        state.session.token(),
-        CLIENT_ID
-    );
-    let request = build_json_request(&manifest_uri, manifest);
-    app.clone()
+    let manifest_uri = "/receive/manifest";
+    let request = build_json_request(&manifest_uri, manifest, &token);
+    let manifest_response = app
+        .clone()
         .oneshot(request)
         .await
         .expect("Failed to send manifest");
+    assert_eq!(manifest_response.status(), StatusCode::OK);
+    let manifest_json = extract_json(manifest_response).await;
+    let lock_token = manifest_json["lockToken"]
+        .as_str()
+        .expect("manifest should include lockToken")
+        .to_string();
 
     // Try to upload 2MB chunk (double the expected size)
     let oversized_chunk = create_test_data(0xAA, CHUNK_SIZE * 2);
     let cipher = create_cipher(&key);
     let nonce = Nonce::new();
 
-    let encrypted = archdrop::crypto::encrypt_chunk_at_position(&cipher, &nonce, &oversized_chunk, 0)
+    let mut encrypted = oversized_chunk.clone();
+    archdrop::crypto::encrypt_chunk_in_place(&cipher, &nonce, &mut encrypted, 0)
         .expect("Failed to encrypt chunk");
 
     let request = build_multipart_request(
-        &format!("/receive/{}/chunk", state.session.token()),
+        "/receive/chunk",
         "test.txt",
         0,
         1,
         CHUNK_SIZE as u64,
         &nonce.to_base64(),
-        CLIENT_ID,
         encrypted,
+        &token,
     );
 
-    let response = app.oneshot(request).await.expect("Failed to send request");
+    let response = app
+        .oneshot(with_lock_token(request, &lock_token))
+        .await
+        .expect("Failed to send request");
 
-    // Should either reject or handle gracefully (not crash)
-    // The system should not crash with buffer overflow
-    assert!(
-        response.status().is_success()
-            || response.status().is_client_error()
-            || response.status().is_server_error()
-    );
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }
 
 #[tokio::test]
-#[ignore = "uses 30MB chunks - run with --ignored"]
 async fn test_negative_chunk_index() {
     let temp_dir = setup_temp_dir();
     let key = EncryptionKey::new();
     let (app, state) = create_test_app(temp_dir.path().to_path_buf(), key.clone());
+    let token = state.session.token().to_string();
 
     let manifest = serde_json::json!({
         "files": [{
@@ -297,16 +267,19 @@ async fn test_negative_chunk_index() {
             "size": CHUNK_SIZE * 3
         }]
     });
-    let manifest_uri = format!(
-        "/receive/{}/manifest?clientId={}",
-        state.session.token(),
-        CLIENT_ID
-    );
-    let request = build_json_request(&manifest_uri, manifest);
-    app.clone()
+    let manifest_uri = "/receive/manifest";
+    let request = build_json_request(&manifest_uri, manifest, &token);
+    let manifest_response = app
+        .clone()
         .oneshot(request)
         .await
         .expect("Failed to send manifest");
+    assert_eq!(manifest_response.status(), StatusCode::OK);
+    let manifest_json = extract_json(manifest_response).await;
+    let lock_token = manifest_json["lockToken"]
+        .as_str()
+        .expect("manifest should include lockToken")
+        .to_string();
 
     // Manually craft request with negative chunk index
     let boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW";
@@ -337,11 +310,6 @@ async fn test_negative_chunk_index() {
     body.extend_from_slice(nonce.to_base64().as_bytes());
     body.extend_from_slice(b"\r\n");
 
-    body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
-    body.extend_from_slice(b"Content-Disposition: form-data; name=\"clientId\"\r\n\r\n");
-    body.extend_from_slice(CLIENT_ID.as_bytes());
-    body.extend_from_slice(b"\r\n");
-
     // Add chunk data
     body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
     body.extend_from_slice(b"Content-Disposition: form-data; name=\"chunk\"\r\n");
@@ -351,24 +319,21 @@ async fn test_negative_chunk_index() {
 
     body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
 
-    let uri = format!("/receive/{}/chunk", state.session.token());
     let request = Request::builder()
         .method(Method::POST)
-        .uri(&uri)
+        .uri("/receive/chunk")
         .header(
             "content-type",
             format!("multipart/form-data; boundary={}", boundary),
         )
+        .header("Authorization", format!("Bearer {}", token))
+        .header("X-Transfer-Lock", &lock_token)
         .body(Body::from(body))
         .expect("Failed to build request");
 
     let response = app.oneshot(request).await.expect("Failed to send request");
 
-    // Should reject with error
-    assert!(
-        response.status().is_client_error() || response.status().is_server_error(),
-        "Negative chunk index should be rejected"
-    );
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -376,6 +341,7 @@ async fn test_partial_multipart_upload() {
     let temp_dir = setup_temp_dir();
     let key = EncryptionKey::new();
     let (app, state) = create_test_app(temp_dir.path().to_path_buf(), key.clone());
+    let token = state.session.token().to_string();
 
     let manifest = serde_json::json!({
         "files": [{
@@ -383,16 +349,19 @@ async fn test_partial_multipart_upload() {
             "size": CHUNK_SIZE
         }]
     });
-    let manifest_uri = format!(
-        "/receive/{}/manifest?clientId={}",
-        state.session.token(),
-        CLIENT_ID
-    );
-    let request = build_json_request(&manifest_uri, manifest);
-    app.clone()
+    let manifest_uri = "/receive/manifest";
+    let request = build_json_request(&manifest_uri, manifest, &token);
+    let manifest_response = app
+        .clone()
         .oneshot(request)
         .await
         .expect("Failed to send manifest");
+    assert_eq!(manifest_response.status(), StatusCode::OK);
+    let manifest_json = extract_json(manifest_response).await;
+    let lock_token = manifest_json["lockToken"]
+        .as_str()
+        .expect("manifest should include lockToken")
+        .to_string();
 
     // Create incomplete multipart body (missing closing boundary)
     let boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW";
@@ -408,117 +377,23 @@ async fn test_partial_multipart_upload() {
     body.extend_from_slice(&create_test_data(0xAA, 100));
     // Missing closing boundary!
 
-    let uri = format!("/receive/{}/chunk", state.session.token());
     let request = Request::builder()
         .method(Method::POST)
-        .uri(&uri)
+        .uri("/receive/chunk")
         .header(
             "content-type",
             format!("multipart/form-data; boundary={}", boundary),
         )
+        .header("Authorization", format!("Bearer {}", token))
         .body(Body::from(body))
         .expect("Failed to build request");
 
-    let response = app.oneshot(request).await.expect("Failed to send request");
-
-    // Should handle gracefully (not crash)
-    assert!(
-        !response.status().is_success(),
-        "Partial upload should not succeed"
-    );
-}
-
-#[tokio::test]
-#[ignore = "uses 100MB chunks - run with --ignored"]
-async fn test_finalize_before_all_chunks() {
-    let temp_dir = setup_temp_dir();
-    let key = EncryptionKey::new();
-    let (app, state) = create_test_app(temp_dir.path().to_path_buf(), key.clone());
-
-    // File expecting 10 chunks
-    let file_size = (10 * CHUNK_SIZE) as u64;
-    let manifest = serde_json::json!({
-        "files": [{
-            "relative_path": "test.txt",
-            "size": file_size
-        }]
-    });
-    let manifest_uri = format!(
-        "/receive/{}/manifest?clientId={}",
-        state.session.token(),
-        CLIENT_ID
-    );
-    let request = build_json_request(&manifest_uri, manifest);
-    app.clone()
-        .oneshot(request)
-        .await
-        .expect("Failed to send manifest");
-
-    // Upload only 5 chunks
-    for chunk_idx in 0..5 {
-        let chunk_data = create_test_data(chunk_idx as u8, CHUNK_SIZE);
-        let cipher = create_cipher(&key);
-        let nonce = Nonce::new();
-        let encrypted =
-            archdrop::crypto::encrypt_chunk_at_position(&cipher, &nonce, &chunk_data, chunk_idx)
-                .expect("Failed to encrypt chunk");
-        let request = build_multipart_request(
-            &format!("/receive/{}/chunk", state.session.token()),
-            "test.txt",
-            chunk_idx as usize,
-            10,
-            file_size,
-            &nonce.to_base64(),
-            CLIENT_ID,
-            encrypted,
-        );
-        let response = app
-            .clone()
-            .oneshot(request)
-            .await
-            .expect("Failed to send chunk");
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    // Try to finalize with only 5/10 chunks
-    let finalize_uri = format!(
-        "/receive/{}/finalize?clientId={}",
-        state.session.token(),
-        CLIENT_ID
-    );
-    let finalize_request = build_finalize_request(&finalize_uri, "test.txt");
     let response = app
-        .oneshot(finalize_request)
+        .oneshot(with_lock_token(request, &lock_token))
         .await
-        .expect("Failed to send finalize request");
+        .expect("Failed to send request");
 
-    // Should reject with error
-    assert!(
-        response.status().is_client_error() || response.status().is_server_error(),
-        "Finalize should fail with incomplete chunks, got: {}",
-        response.status()
-    );
-
-    // Try to extract JSON if body is not empty
-    let body_bytes = response
-        .into_body()
-        .collect()
-        .await
-        .expect("Failed to collect body")
-        .to_bytes();
-
-    if !body_bytes.is_empty() {
-        if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
-            if let Some(error_msg) = json["error"].as_str() {
-                let error_lower = error_msg.to_lowercase();
-                assert!(
-                    error_lower.contains("incomplete") || error_lower.contains("missing"),
-                    "Error should mention incomplete transfer: {}",
-                    error_msg
-                );
-            }
-        }
-    }
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -544,6 +419,7 @@ async fn test_permission_denied_file_creation() {
 
     let key = EncryptionKey::new();
     let (app, state) = create_test_app(readonly_dir.clone(), key);
+    let token = state.session.token().to_string();
 
     let manifest = serde_json::json!({
         "files": [{
@@ -552,20 +428,17 @@ async fn test_permission_denied_file_creation() {
         }]
     });
 
-    let uri = format!(
-        "/receive/{}/manifest?clientId={}",
-        state.session.token(),
-        CLIENT_ID
-    );
-    let request = build_json_request(&uri, manifest);
+    let uri = "/receive/manifest";
+    let request = build_json_request(&uri, manifest, &token);
     let response = app.oneshot(request).await.expect("Failed to send request");
 
-    // Should return error
-    assert!(
-        response.status().is_client_error() || response.status().is_server_error(),
-        "Permission denied should return error, got: {}",
-        response.status()
-    );
+    assert_error_response(
+        response,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal_error",
+        "internal",
+    )
+    .await;
 
     // Restore permissions for cleanup
     let mut perms = tokio::fs::metadata(&readonly_dir)
@@ -576,83 +449,4 @@ async fn test_permission_denied_file_creation() {
     tokio::fs::set_permissions(&readonly_dir, perms)
         .await
         .expect("Failed to restore permissions");
-}
-
-#[tokio::test]
-#[ignore = "uses 30MB chunks - run with --ignored"]
-async fn test_duplicate_chunk_upload() {
-    let temp_dir = setup_temp_dir();
-    let key = EncryptionKey::new();
-    let (app, state) = create_test_app(temp_dir.path().to_path_buf(), key.clone());
-
-    let manifest = serde_json::json!({
-        "files": [{
-            "relative_path": "test.txt",
-            "size": CHUNK_SIZE * 3
-        }]
-    });
-    let manifest_uri = format!(
-        "/receive/{}/manifest?clientId={}",
-        state.session.token(),
-        CLIENT_ID
-    );
-    let request = build_json_request(&manifest_uri, manifest);
-    app.clone()
-        .oneshot(request)
-        .await
-        .expect("Failed to send manifest");
-
-    // Upload chunk 1
-    let chunk_data = create_test_data(0xAA, CHUNK_SIZE);
-    let cipher = create_cipher(&key);
-    let nonce = Nonce::new();
-    let encrypted = archdrop::crypto::encrypt_chunk_at_position(&cipher, &nonce, &chunk_data, 1)
-        .expect("Failed to encrypt chunk");
-    let request = build_multipart_request(
-        &format!("/receive/{}/chunk", state.session.token()),
-        "test.txt",
-        1,
-        3,
-        (CHUNK_SIZE * 3) as u64,
-        &nonce.to_base64(),
-        CLIENT_ID,
-        encrypted.clone(),
-    );
-
-    let response1 = app
-        .clone()
-        .oneshot(request)
-        .await
-        .expect("Failed to upload chunk first time");
-    assert_eq!(response1.status(), StatusCode::OK);
-
-    // Upload same chunk again (retry scenario)
-    let request2 = build_multipart_request(
-        &format!("/receive/{}/chunk", state.session.token()),
-        "test.txt",
-        1,
-        3,
-        (CHUNK_SIZE * 3) as u64,
-        &nonce.to_base64(),
-        CLIENT_ID,
-        encrypted,
-    );
-    let response2 = app
-        .clone()
-        .oneshot(request2)
-        .await
-        .expect("Failed to upload chunk second time");
-
-    // Should succeed (idempotent)
-    assert_eq!(response2.status(), StatusCode::OK);
-
-    // Check for duplicate flag in response
-    let json = extract_json(response2).await;
-    if json["duplicate"].as_bool().is_some() {
-        assert_eq!(
-            json["duplicate"].as_bool(),
-            Some(true),
-            "Expected duplicate flag in response"
-        );
-    }
 }

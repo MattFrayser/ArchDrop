@@ -47,8 +47,13 @@ pub async fn start_send_server(
     let progress_tracker = Arc::new(ProgressTracker::new());
 
     // Create typed state for router
-    let send_state =
-        SendAppState::new(session_key, manifest, total_chunks, progress_tracker.clone(), transfer_settings);
+    let send_state = SendAppState::new(
+        session_key,
+        manifest,
+        total_chunks,
+        progress_tracker.clone(),
+        transfer_settings,
+    );
     let app = routes::create_send_router(&send_state);
 
     let server = ServerInstance::new(app, display_name);
