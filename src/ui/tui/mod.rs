@@ -1,7 +1,9 @@
 mod output;
-mod tui;
+mod render;
+mod types;
 mod ui;
 
 pub use output::{spinner, spinner_error, spinner_success};
-pub use tui::TransferUI;
-pub use ui::{generate_qr, spawn_tui};
+pub use render::{spawn_tui, TransferUI};
+pub use types::{FileProgress, FileStatus, TransferProgress, TuiConfig};
+pub use ui::generate_qr;
