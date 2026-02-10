@@ -65,7 +65,7 @@ fn config_text_for_edit(path: &Path) -> Result<String> {
     }
 }
 
-/// Edit the config file via $EDITOR (validate before persisting.)
+/// Edit the config file via $EDITOR (validates before persisting.)
 pub(super) fn edit_config(path: &Path, no_retry: bool) -> Result<bool> {
     let stdin = std::io::stdin();
     let mut input = stdin.lock();
