@@ -16,7 +16,6 @@ fn precedence_defaults_file_env_cli() {
             let cli_args = CliArgs {
                 via: Some(Transport::Local),
                 port: Some(3333),
-                ..Default::default()
             };
 
             let config = load_config(&cli_args).expect("load config");

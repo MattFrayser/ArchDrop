@@ -15,7 +15,7 @@ impl SendFileHandle {
     /// Open a file handle for chunked reads with expected file size.
     #[tracing::instrument(fields(path = %path.display(), size))]
     pub fn open(path: &Path, size: u64) -> Result<Self> {
-        let file = File::open(&path).context(format!(
+        let file = File::open(path).context(format!(
             "Failed to open file for sending: {}",
             path.display()
         ))?;
