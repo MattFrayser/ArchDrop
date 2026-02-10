@@ -100,7 +100,7 @@ function removeFile(index) {
 //===========
 // LOGIC
 //==========
-async function sendManifest(token, files) {
+async function sendManifest(files) {
     const manifest = {
         files: files.map(file => ({
             relative_path: file.webkitRelativePath || file.name,
@@ -108,12 +108,9 @@ async function sendManifest(token, files) {
         }))
     };
 
-    const clientId = getClientId();
-    const url = `/receive/${token}/manifest?clientId=${clientId}`;
-    console.log('Sending manifest:', { token, clientId, fileCount: files.length, url });
-    const response = await fetch(url, {
+    const response = await fetch('/receive/manifest', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify(manifest)
     });
 
@@ -152,11 +149,11 @@ async function uploadFiles(selectedFiles) {
 
     try {
         const { key } = await getEncryptionKeyFromUrl(['encrypt'])
-        const token = getTokenFromUrl()
 
         // Send manifest first so server knows total chunks
         console.time('Manifest upload');
-        const manifestResponse = await sendManifest(token, selectedFiles);
+        const manifestResponse = await sendManifest(selectedFiles);
+        setLockToken(manifestResponse.lockToken)
         const transferConfig = manifestResponse.config
         console.timeEnd('Manifest upload');
 
@@ -167,7 +164,7 @@ async function uploadFiles(selectedFiles) {
 
                 fileItem.classList.add('uploading')
                 try {
-                    await uploadFile(file, relativePath,token, key, fileItem, transferConfig)
+                    await uploadFile(file, relativePath, key, fileItem, transferConfig)
                     fileItem.classList.remove('uploading')
                     fileItem.classList.add('completed')
                 } catch (error) {
@@ -179,8 +176,7 @@ async function uploadFiles(selectedFiles) {
             DEFAULT_CONCURRENT
         )
 
-        const clientId = getClientId()
-        await fetch(`/receive/${token}/complete?clientId=${clientId}`, { method: 'POST' })
+        await fetch('/receive/complete', { method: 'POST', headers: transferHeaders() })
 
         uploadBtn.textContent = 'Upload Complete!'
 
@@ -192,7 +188,7 @@ async function uploadFiles(selectedFiles) {
     }
 }
 
-async function uploadFile(file, relativePath, token, key, fileItem, config) {
+async function uploadFile(file, relativePath, key, fileItem, config) {
     // each file gets its own nonce
     const chunkSize = config.chunk_size
     const totalChunks = Math.ceil(file.size / chunkSize)
@@ -228,11 +224,10 @@ async function uploadFile(file, relativePath, token, key, fileItem, config) {
         formData.append('relativePath', relativePath)
         formData.append('fileName', file.name)
         formData.append('chunkIndex', chunkIndex.toString())
-        formData.append('clientId', getClientId())
         formData.append('nonce', nonceBase64)
 
         // Upload chunk
-        await uploadChunk(token, formData, chunkIndex, relativePath)
+        await uploadChunk(formData, chunkIndex, relativePath)
         completedChunks++
         updateFileProgress(fileItem, completedChunks, totalChunks)
     }
@@ -247,16 +242,14 @@ async function uploadFile(file, relativePath, token, key, fileItem, config) {
     }
 
     console.timeEnd(`${relativePath} - total`);
-    await finalizeFile(token, relativePath);
+    await finalizeFile(relativePath);
 
     const progressText = fileItem.querySelector('.progress-text')
     if (progressText) progressText.textContent = 'Upload complete!'
 }
 
-async function uploadChunk(token, formData, chunkIndex, relativePath) {
-    const clientId = getClientId()
-    const url = `/receive/${token}/chunk?clientId=${clientId}`
-
+async function uploadChunk(formData, chunkIndex, relativePath) {
+    const url = '/receive/chunk'
     return await retryWithExponentialBackoff(async () => {
         const controller = new AbortController()
         const timeoutDuration = 30000
@@ -267,7 +260,8 @@ async function uploadChunk(token, formData, chunkIndex, relativePath) {
             const response = await fetch(url, {
                 method: 'POST',
                 body: formData,
-                signal: controller.signal
+                signal: controller.signal,
+                headers: transferHeaders()
             })
 
             clearTimeout(timeout)
@@ -288,21 +282,18 @@ async function uploadChunk(token, formData, chunkIndex, relativePath) {
     }, 3, `chunk ${chunkIndex}`)
 }
 
-async function finalizeFile(token, relativePath) {
+async function finalizeFile(relativePath) {
     const formData = new FormData();
     formData.append('relativePath', relativePath);
-    
-    const clientId = getClientId()
-    const url = `/receive/${token}/finalize?clientId=${clientId}`
-    const response = await fetch(url, {
+
+    const response = await fetch('/receive/finalize', {
         method: 'POST',
-        body: formData
+        body: formData,
+        headers: transferHeaders()
     });
     
     if (!response.ok) {
         throw new Error(`Failed to finalize ${relativePath}`);
     }
 }
-
-
 

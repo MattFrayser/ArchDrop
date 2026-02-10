@@ -1,11 +1,11 @@
 use axum::{
     http::StatusCode,
-    response::{IntoResponse, Response, Json as AxumJson},
+    response::{IntoResponse, Json as AxumJson, Response},
 };
 use serde_json::json;
 use thiserror::Error;
 
-/// Structured error types with proper HTTP status code mapping
+/// Structured error types for HTTP status code mapping
 #[derive(Error, Debug)]
 pub enum AppError {
     #[error("Unauthorized: {0}")]
@@ -16,6 +16,9 @@ pub enum AppError {
 
     #[error("Bad request: {0}")]
     BadRequest(String),
+
+    #[error("Conflict: {0}")]
+    Conflict(String),
 
     #[error("Insufficient storage: {0}")]
     InsufficientStorage(String),
@@ -28,18 +31,15 @@ pub enum AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, error_type, message) = match self {
-            AppError::Unauthorized(msg) => {
-                (StatusCode::UNAUTHORIZED, "unauthorized", msg)
-            }
-            AppError::NotFound(msg) => {
-                (StatusCode::NOT_FOUND, "not_found", msg)
-            }
-            AppError::BadRequest(msg) => {
-                (StatusCode::BAD_REQUEST, "bad_request", msg)
-            }
-            AppError::InsufficientStorage(msg) => {
-                (StatusCode::INSUFFICIENT_STORAGE, "insufficient_storage", msg)
-            }
+            AppError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, "unauthorized", msg),
+            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, "not_found", msg),
+            AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "bad_request", msg),
+            AppError::Conflict(msg) => (StatusCode::CONFLICT, "conflict", msg),
+            AppError::InsufficientStorage(msg) => (
+                StatusCode::INSUFFICIENT_STORAGE,
+                "insufficient_storage",
+                msg,
+            ),
             AppError::Internal(ref err) => {
                 // Log full error with backtrace server-side
                 tracing::error!(

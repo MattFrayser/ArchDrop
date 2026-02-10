@@ -1,157 +1,155 @@
-use crate::common::{session_trait::Session, AppError};
+use async_trait::async_trait;
+use axum::extract::FromRequestParts;
+use axum::http::request::Parts;
 
-#[derive(serde::Deserialize)]
-pub struct ClientIdParam {
-    #[serde(rename = "clientId")]
-    pub client_id: String,
+use crate::common::{session_core::ClaimError, session_core::Session, AppError};
+
+pub const LOCK_HEADER_NAME: &str = "x-transfer-lock";
+
+/// Extracts a bearer token from the `Authorization: Bearer <token>` header.
+pub struct BearerToken(pub String);
+
+/// Extracts the transfer lock token from the `X-Transfer-Lock` header.
+pub struct LockToken(pub String);
+
+#[async_trait]
+impl<S: Send + Sync> FromRequestParts<S> for BearerToken {
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let header = parts
+            .headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| AppError::Unauthorized("missing authorization header".to_string()))?;
+
+        let token = header
+            .strip_prefix("Bearer ")
+            .ok_or_else(|| AppError::Unauthorized("invalid authorization header".to_string()))?;
+
+        if token.trim().is_empty() {
+            return Err(AppError::Unauthorized(
+                "invalid authorization header".to_string(),
+            ));
+        }
+
+        Ok(BearerToken(token.to_string()))
+    }
 }
 
-// Used for handlers that should only work with already claimed sessions
+#[async_trait]
+impl<S: Send + Sync> FromRequestParts<S> for LockToken {
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let value = parts
+            .headers
+            .get(LOCK_HEADER_NAME)
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| AppError::Unauthorized("missing transfer lock header".to_string()))?;
+
+        if value.trim().is_empty() {
+            return Err(AppError::Unauthorized(
+                "invalid transfer lock header".to_string(),
+            ));
+        }
+
+        Ok(LockToken(value.to_string()))
+    }
+}
+
 pub fn require_active_session(
-    session: &impl Session,
+    session: &Session,
     token: &str,
-    client_id: &str,
+    lock_token: &str,
 ) -> Result<(), AppError> {
-    if !session.is_active(token, client_id) {
+    if !session.is_active(token, lock_token) {
         return Err(AppError::Unauthorized("session not active".to_string()));
     }
     Ok(())
 }
 
-// Used for handlers that initiate transfer
-pub fn claim_or_validate_session(
-    session: &impl Session,
-    token: &str,
-    client_id: &str,
-) -> Result<(), AppError> {
-    if !session.claim(token, client_id) {
-        return Err(AppError::Unauthorized("claim session failed".to_string()));
+pub fn claim_session(session: &Session, token: &str) -> Result<String, AppError> {
+    match session.claim(token) {
+        Ok(lock_token) => Ok(lock_token),
+        Err(ClaimError::InvalidToken) => {
+            Err(AppError::Unauthorized("invalid session token".to_string()))
+        }
+        Err(ClaimError::AlreadyClaimed) => {
+            Err(AppError::Conflict("session already claimed".to_string()))
+        }
+        Err(ClaimError::Completed) => Err(AppError::Conflict("session completed".to_string())),
     }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::session_core::SessionImpl;
+    use crate::common::session_core::Session;
     use crate::crypto::types::EncryptionKey;
 
     #[test]
     fn test_require_active_unclaimed_session() {
-        // Create an unclaimed session
         let key = EncryptionKey::new();
-        let session = SessionImpl::new(key);
+        let session = Session::new(key);
         let token = session.token();
 
-        // Attempt to require active session without claiming first
-        let result = require_active_session(&session, token, "client1");
-
-        // Should fail because session is unclaimed
+        let result = require_active_session(&session, token, "lock1");
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_require_active_wrong_client_id() {
-        // Create session and claim with client A
+    fn test_require_active_wrong_lock_token() {
         let key = EncryptionKey::new();
-        let session = SessionImpl::new(key);
+        let session = Session::new(key);
         let token = session.token();
-        assert!(session.claim(token, "client_a"));
+        let lock = claim_session(&session, token).expect("claim should succeed");
 
-        // Try to access with client B
-        let result = require_active_session(&session, token, "client_b");
-
-        // Should fail because client_id doesn't match
+        let result = require_active_session(&session, token, &format!("{}-bad", lock));
         assert!(result.is_err());
     }
 
     #[test]
     fn test_require_active_valid_session() {
-        // Create session and claim with client A
         let key = EncryptionKey::new();
-        let session = SessionImpl::new(key);
+        let session = Session::new(key);
         let token = session.token();
-        assert!(session.claim(token, "client_a"));
+        let lock = claim_session(&session, token).expect("claim should succeed");
 
-        // Access with same client should succeed
-        let result = require_active_session(&session, token, "client_a");
+        let result = require_active_session(&session, token, &lock);
         assert!(result.is_ok());
     }
 
     #[test]
-    fn test_claim_or_validate_idempotent() {
-        // Create session
+    fn test_claim_session_second_claim_conflict() {
         let key = EncryptionKey::new();
-        let session = SessionImpl::new(key);
+        let session = Session::new(key);
         let token = session.token();
 
-        // First claim should succeed
-        let result1 = claim_or_validate_session(&session, token, "client_a");
-        assert!(result1.is_ok());
+        let first = claim_session(&session, token);
+        assert!(first.is_ok());
 
-        // Same client claiming again should succeed (idempotent)
-        let result2 = claim_or_validate_session(&session, token, "client_a");
-        assert!(result2.is_ok());
+        let second = claim_session(&session, token);
+        assert!(matches!(second, Err(AppError::Conflict(_))));
     }
 
     #[test]
-    fn test_claim_or_validate_different_client() {
-        // Create session and claim with client A
+    fn test_claim_invalid_token() {
         let key = EncryptionKey::new();
-        let session = SessionImpl::new(key);
-        let token = session.token();
+        let session = Session::new(key);
 
-        // Client A claims successfully
-        let result1 = claim_or_validate_session(&session, token, "client_a");
-        assert!(result1.is_ok());
-
-        // Client B tries to claim - should fail
-        let result2 = claim_or_validate_session(&session, token, "client_b");
-        assert!(result2.is_err());
-    }
-
-    #[test]
-    fn test_invalid_token_format() {
-        // Create session with valid token
-        let key = EncryptionKey::new();
-        let session = SessionImpl::new(key);
-
-        // Try to claim with wrong token
-        let result = claim_or_validate_session(&session, "invalid-token-12345", "client_a");
-
-        // Should fail because token doesn't match
+        let result = claim_session(&session, "invalid-token-12345");
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_empty_client_id() {
-        // Create session
+    fn test_require_active_with_wrong_bearer() {
         let key = EncryptionKey::new();
-        let session = SessionImpl::new(key);
+        let session = Session::new(key);
         let token = session.token();
+        let lock = claim_session(&session, token).expect("claim should succeed");
 
-        // Empty client_id should be rejected
-        let result = claim_or_validate_session(&session, token, "");
-        assert!(result.is_err(), "Empty client_id should be rejected");
-
-        // Whitespace-only should also be rejected
-        let result2 = claim_or_validate_session(&session, token, "   ");
-        assert!(
-            result2.is_err(),
-            "Whitespace-only client_id should be rejected"
-        );
-    }
-
-    #[test]
-    fn test_require_active_with_wrong_token() {
-        // Create and claim session
-        let key = EncryptionKey::new();
-        let session = SessionImpl::new(key);
-        let token = session.token();
-        assert!(session.claim(token, "client_a"));
-
-        // Try to access with wrong token
-        let result = require_active_session(&session, "wrong-token", "client_a");
+        let result = require_active_session(&session, "wrong-token", &lock);
         assert!(result.is_err());
     }
 }

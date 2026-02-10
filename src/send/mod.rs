@@ -1,8 +1,8 @@
-pub mod handlers;
+mod buffer_pool;
 mod file_handle;
-mod session;
+pub mod handlers;
 mod state;
 
+pub use buffer_pool::BufferPool;
 pub use file_handle::SendFileHandle;
-pub use session::SendSession;
 pub use state::SendAppState;

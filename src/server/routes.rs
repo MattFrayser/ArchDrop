@@ -11,19 +11,13 @@ use axum::{extract::DefaultBodyLimit, routing::*, Router};
 pub fn create_send_router(state: &SendAppState) -> Router {
     Router::new()
         .route("/health", get(|| async { "OK" }))
+        .route("/send/manifest", get(send::handlers::manifest_handler))
         .route(
-            "/send/:token/manifest",
-            get(send::handlers::manifest_handler),
-        )
-        .route(
-            "/send/:token/:file_index/chunk/:chunk_index",
+            "/send/:file_index/chunk/:chunk_index",
             get(send::handlers::send_handler),
         )
-        .route(
-            "/send/:token/complete",
-            post(send::handlers::complete_download),
-        )
-        .route("/send/:token", get(web::serve_download_page))
+        .route("/send/complete", post(send::handlers::complete_download))
+        .route("/send", get(web::serve_download_page))
         .route("/download.js", get(web::serve_download_js))
         .route("/styles.css", get(web::serve_shared_css))
         .route("/shared.js", get(web::serve_shared_js))
@@ -32,24 +26,20 @@ pub fn create_send_router(state: &SendAppState) -> Router {
 
 /// Create router for receive mode
 pub fn create_receive_router(state: &ReceiveAppState) -> Router {
-    // CHUNK_SIZE is 10MB (local mode), with encryption + FormData overhead ~10.5MB per request
     Router::new()
         .route("/health", get(|| async { "OK" }))
         .route(
-            "/receive/:token/manifest",
+            "/receive/manifest",
             post(receive::handlers::receive_manifest),
         )
+        .route("/receive/chunk", post(receive::handlers::receive_handler))
         .route(
-            "/receive/:token/chunk",
-            post(receive::handlers::receive_handler),
-        )
-        .route(
-            "/receive/:token/finalize",
+            "/receive/finalize",
             post(receive::handlers::finalize_upload),
         )
-        .route("/receive/:token", get(web::serve_upload_page))
+        .route("/receive", get(web::serve_upload_page))
         .route(
-            "/receive/:token/complete",
+            "/receive/complete",
             post(receive::handlers::complete_transfer),
         )
         .route("/upload.js", get(web::serve_upload_js))

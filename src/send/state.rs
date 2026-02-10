@@ -1,29 +1,102 @@
-use crate::common::config::TransferConfig;
-use crate::common::{Session, TransferState};
+use crate::common::config::TransferSettings;
+use crate::common::{manifest::FileEntry, Manifest, Session, TransferState};
+use crate::crypto::types::EncryptionKey;
+use crate::send::buffer_pool::BufferPool;
 use crate::send::file_handle::SendFileHandle;
-use crate::send::session::SendSession;
 use crate::server::progress::ProgressTracker;
 use dashmap::DashMap;
+use std::ops::Deref;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-/// Send-specific application state
-/// Passed to all send handlers via Axum State extractor
 #[derive(Clone)]
 pub struct SendAppState {
-    pub session: SendSession,
-    pub progress: ProgressTracker,
+    inner: Arc<SendAppStateInner>,
+}
+
+/// Send-specific application state
+/// Stored once behind Arc and cloned cheaply by handlers/router.
+pub struct SendAppStateInner {
+    pub session: Session,
+    pub manifest: Manifest,
+    pub progress: Arc<ProgressTracker>,
     pub file_handles: Arc<DashMap<usize, Arc<SendFileHandle>>>,
-    pub config: TransferConfig,
+    pub buffer_pool: Arc<BufferPool>,
+    pub config: TransferSettings,
+    chunks_sent: Arc<AtomicU64>,
+    sent_chunks: Arc<DashMap<(usize, usize), ()>>,
+    total_chunks: Arc<AtomicU64>,
+}
+
+impl Deref for SendAppState {
+    type Target = SendAppStateInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
 }
 
 impl SendAppState {
-    pub fn new(session: SendSession, progress: ProgressTracker, config: TransferConfig) -> Self {
+    pub fn new(
+        session_key: EncryptionKey,
+        manifest: Manifest,
+        total_chunks: u64,
+        progress: Arc<ProgressTracker>,
+        config: TransferSettings,
+    ) -> Self {
+        // +16 bytes for AES-GCM tag appended during encrypt_in_place
+        let buf_capacity = config.chunk_size as usize + 16;
+        let pool_size = config.concurrency;
+
         Self {
-            session,
-            progress,
-            file_handles: Arc::new(DashMap::new()),
-            config,
+            inner: Arc::new(SendAppStateInner {
+                session: Session::new(session_key),
+                manifest,
+                progress,
+                file_handles: Arc::new(DashMap::new()),
+                buffer_pool: BufferPool::new(pool_size, buf_capacity),
+                config,
+                chunks_sent: Arc::new(AtomicU64::new(0)),
+                sent_chunks: Arc::new(DashMap::new()),
+                total_chunks: Arc::new(AtomicU64::new(total_chunks)),
+            }),
         }
+    }
+
+    pub fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+
+    pub fn get_file(&self, index: usize) -> Option<&FileEntry> {
+        self.manifest.files.get(index)
+    }
+
+    pub fn increment_sent_chunk(&self) -> (u64, u64) {
+        let new_count = self.chunks_sent.fetch_add(1, Ordering::SeqCst) + 1;
+        let total = self.total_chunks.load(Ordering::SeqCst);
+        (new_count, total)
+    }
+
+    pub fn has_chunk_been_sent(&self, file_index: usize, chunk_index: usize) -> bool {
+        self.sent_chunks.contains_key(&(file_index, chunk_index))
+    }
+
+    pub fn mark_chunk_sent(&self, file_index: usize, chunk_index: usize) -> bool {
+        self.sent_chunks
+            .insert((file_index, chunk_index), ())
+            .is_none()
+    }
+
+    pub fn unique_chunks_sent(&self) -> usize {
+        self.sent_chunks.len()
+    }
+
+    pub fn get_chunks_sent(&self) -> u64 {
+        self.chunks_sent.load(Ordering::SeqCst)
+    }
+
+    pub fn get_total_chunks(&self) -> u64 {
+        self.total_chunks.load(Ordering::SeqCst)
     }
 }
 
@@ -41,7 +114,7 @@ impl TransferState for SendAppState {
         self.file_handles.clear();
     }
 
-    fn session(&self) -> &dyn Session {
+    fn session(&self) -> &Session {
         &self.session
     }
 
@@ -52,4 +125,37 @@ impl TransferState for SendAppState {
     fn is_receiving(&self) -> bool {
         false
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::config::TransferSettings;
+
+    #[test]
+    fn clone_shares_total_chunks_atomic() {
+        let state = SendAppState::new(
+            EncryptionKey::new(),
+            Manifest {
+                files: Vec::new(),
+                config: TransferSettings {
+                    chunk_size: 1024,
+                    concurrency: 1,
+                },
+            },
+            3,
+            Arc::new(ProgressTracker::new()),
+            TransferSettings {
+                chunk_size: 1024,
+                concurrency: 1,
+            },
+        );
+
+        let cloned = state.clone();
+
+        state.total_chunks.store(9, Ordering::SeqCst);
+
+        assert_eq!(cloned.get_total_chunks(), 9);
+    }
+
 }

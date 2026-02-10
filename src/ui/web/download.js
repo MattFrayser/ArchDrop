@@ -196,7 +196,6 @@ const keyStore = new KeyStore();
 //=============
 let cachedManifest = null
 let cachedToken = null
-let cachedClientId = null
 
 // Download button
 document.addEventListener('DOMContentLoaded', async () => {
@@ -208,15 +207,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Load manifest and display files
     try {
         cachedToken = getTokenFromUrl()
-        cachedClientId = getClientId()
 
-        const manifestResponse = await fetch(`/send/${cachedToken}/manifest?clientId=${cachedClientId}`)
+        const manifestResponse = await fetch('/send/manifest', {
+            headers: authHeaders()
+        })
         if (!manifestResponse.ok) {
             throw new Error(`Failed to fetch manifest: HTTP ${manifestResponse.status}`);
 
         }
 
         cachedManifest = await manifestResponse.json()
+        setLockToken(cachedManifest.lockToken)
 
         // Extract and store keys
         const { key } = await getEncryptionKeyFromUrl(['decrypt'])
@@ -278,7 +279,7 @@ async function handleDownloadAction() {
     if (isTransferComplete) {
         // ACTION: Finish and Close
         try {
-            await fetch(`/send/${cachedToken}/complete?clientId=${cachedClientId}`, { method: 'POST' });
+            await fetch('/send/complete', { method: 'POST', headers: transferHeaders() });
             downloadBtn.textContent = 'Connection Closed';
             window.close(); // Try to close tab
         } catch (e) {
@@ -291,7 +292,7 @@ async function handleDownloadAction() {
 }
 
 async function downloadFile(token, fileEntry, fileItem, transferConfig) {
-    const downloadManager = new DownloadManager(token, cachedClientId, transferConfig);
+    const downloadManager = new DownloadManager(token, transferConfig);
     await downloadManager.download(fileEntry, fileItem);
 }
 
@@ -362,8 +363,7 @@ async function startDownload() {
 
         // Completion
         await retryWithExponentialBackoff(async () => {
-            const url = `/send/${cachedToken}/complete?clientId=${cachedClientId}`;
-            const response = await fetch(url, { method: 'POST' });
+            const response = await fetch('/send/complete', { method: 'POST', headers: transferHeaders() });
             if (!response.ok) {
                 throw new Error(`Completion handshake failed: ${response.status}`);
             }
@@ -383,9 +383,8 @@ async function startDownload() {
     }
 }
 class DownloadManager {
-    constructor(token, clientId, config) {
+    constructor(token, config) {
         this.token = token
-        this.clientId = clientId
         this.config = getBrowserConfig()
         this.transferConfig = config
     }
@@ -499,8 +498,8 @@ class DownloadManager {
 
             try {
                 const res = await fetch(
-                    `/send/${this.token}/${fileEntry.index}/chunk/${chunkIndex}?clientId=${this.clientId}`,
-                    { signal: controller.signal }
+                    `/send/${fileEntry.index}/chunk/${chunkIndex}`,
+                    { signal: controller.signal, headers: transferHeaders() }
                 )
 
                 clearTimeout(timeout)

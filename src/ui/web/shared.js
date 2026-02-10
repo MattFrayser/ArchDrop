@@ -25,17 +25,28 @@ function urlSafeBase64ToUint8Array(str) {
     return bytes
 }
 
-async function getEncryptionKeyFromUrl(usages = ['encrypt', 'decrypt']) {
-    const fragment = window.location.hash.substring(1) // remove #
+// Cache for values extracted from the URL fragment (cleared after first read)
+let _fragmentToken = null
+let _fragmentKey = null
+
+function _parseFragment() {
+    if (_fragmentToken !== null) return // already parsed
+    const fragment = window.location.hash.substring(1)
     const params = new URLSearchParams(fragment)
-    const keyBase64 = params.get('key')
+    _fragmentToken = params.get('token') || ''
+    _fragmentKey = params.get('key') || ''
+
+    // Clear URL fragment immediately to prevent it from persisting in browser history
+    history.replaceState(null, document.title, location.pathname + location.search)
+}
+
+async function getEncryptionKeyFromUrl(usages = ['encrypt', 'decrypt']) {
+    _parseFragment()
+    const keyBase64 = _fragmentKey
 
     if (!keyBase64) {
         throw new Error('Missing encryption key')
     }
-
-    // Clear URL fragment immediately after extraction to prevent it from persisting in browser history
-    history.replaceState(null, document.title, location.pathname + location.search)
 
     // base64 -> string -> byte array
     const keyData = urlSafeBase64ToUint8Array(keyBase64);
@@ -52,7 +63,29 @@ async function getEncryptionKeyFromUrl(usages = ['encrypt', 'decrypt']) {
 }
 
 function getTokenFromUrl() {
-    return window.location.pathname.split('/').pop()
+    _parseFragment()
+    return _fragmentToken
+}
+
+function authHeaders() {
+    return { 'Authorization': 'Bearer ' + getTokenFromUrl() }
+}
+
+const LOCK_HEADER_NAME = 'X-Transfer-Lock'
+let _lockToken = ''
+
+function setLockToken(lockToken) {
+    _lockToken = lockToken || ''
+}
+
+function transferHeaders() {
+    if (!_lockToken) {
+        throw new Error('Missing transfer lock token')
+    }
+    return {
+        ...authHeaders(),
+        [LOCK_HEADER_NAME]: _lockToken
+    }
 }
 
 function arrayBufferToBase64(buffer) {
@@ -70,21 +103,6 @@ function arrayBufferToBase64(buffer) {
     return base64
 }
 
-//===============
-// CLIENT_ID
-//==============
-const CLIENT_ID_KEY = 'archdrop_client_id';
-
-function getClientId() {
-    let clientId = localStorage.getItem(CLIENT_ID_KEY);
-
-    if (!clientId) {
-        clientId = generateUuid();
-        localStorage.setItem(CLIENT_ID_KEY, clientId);
-    }
-    return clientId;
-}
-
 //==============
 // Crypto
 //==============
@@ -100,11 +118,6 @@ function generateNonce(nonceBase64, counter) {
     view.setUint32(8, counter, false) // false = BE32
 
     return nonce
-}
-
-function generateUuid() {
-    // Use cryptographically secure UUID generation
-    return crypto.randomUUID();
 }
 
 //=============

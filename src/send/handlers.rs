@@ -1,67 +1,81 @@
-use std::sync::Arc;
-use std::time::Duration;
+//! HTTP handlers for manifest, chunk, and completion endpoints.
 
-use crate::common::{AppError, Manifest, Session};
-use crate::crypto::{self, Nonce};
-use crate::send::file_handle::SendFileHandle;
-use crate::server::auth::{self, ClientIdParam};
 use anyhow::{Context, Result};
-use axum::extract::Query;
 use axum::{
     body::Body,
     extract::{Path, State},
     http::Response,
     Json,
 };
+use bytes::Bytes;
 use reqwest::header;
-use tokio::time::sleep;
+use std::sync::Arc;
+
+use crate::common::AppError;
+use crate::crypto::{self, Nonce};
+use crate::send::buffer_pool::BufferPool;
+use crate::send::file_handle::SendFileHandle;
+use crate::server::auth::{self, BearerToken, LockToken};
 
 use super::SendAppState;
 
-#[derive(serde::Deserialize)]
-pub struct ChunkParams {
-    #[serde(rename = "clientId")]
-    client_id: String,
+/// Manifest payload plus lock token for authenticated chunk requests.
+#[derive(serde::Serialize)]
+pub struct SendManifestResponse {
+    #[serde(flatten)]
+    manifest: crate::common::Manifest,
+    #[serde(rename = "lockToken")]
+    lock_token: String,
 }
 
-// Client will use manifest to know what it is downloading
+/// Claim the session and return the transfer manifest.
 pub async fn manifest_handler(
-    Path(token): Path<String>,
-    Query(params): Query<ClientIdParam>,
+    BearerToken(token): BearerToken,
     State(state): State<SendAppState>,
-) -> Result<Json<Manifest>, AppError> {
+) -> Result<Json<SendManifestResponse>, AppError> {
     // Session claimed when fetching manifest
     // Manifests holds info about files (sizes, names) only client should see
-    auth::claim_or_validate_session(&state.session, &token, &params.client_id)?;
+    let lock_token = auth::claim_session(&state.session, &token)?;
 
     // Get manifest from session
-    let manifest = state.session.manifest();
+    let manifest = state.manifest();
 
-    Ok(Json(manifest.clone()))
+    // Initialize file tracking for TUI
+    let names: Vec<String> = manifest.files.iter().map(|f| f.name.clone()).collect();
+    let totals: Vec<u64> = manifest
+        .files
+        .iter()
+        .map(|f| f.size.div_ceil(state.config.chunk_size))
+        .collect();
+    state.progress.init_files(names, totals);
+
+    Ok(Json(SendManifestResponse {
+        manifest: manifest.clone(),
+        lock_token,
+    }))
 }
 
+/// Serve one encrypted chunk for a file index/chunk index pair.
 pub async fn send_handler(
-    Path((token, file_index, chunk_index)): Path<(String, usize, usize)>,
-    Query(params): Query<ChunkParams>,
+    BearerToken(token): BearerToken,
+    LockToken(lock_token): LockToken,
+    Path((file_index, chunk_index)): Path<(usize, usize)>,
     State(state): State<SendAppState>,
 ) -> Result<Response<Body>, AppError> {
-    // Sessions are claimed by manifest, so just check client
-    let client_id = &params.client_id;
-    auth::require_active_session(&state.session, &token, client_id)?;
-
-    // Some browser send multiple retries (safari)
-    // Be noted to not count towards total
-    let is_retry = state.session.has_chunk_been_sent(file_index, chunk_index);
-    if !is_retry {
-        state.session.mark_chunk_sent(file_index, chunk_index);
-        state.progress.increment();
-    }
+    auth::require_active_session(&state.session, &token, &lock_token)?;
 
     let file_entry = state
-        .session
         .get_file(file_index)
         .ok_or_else(|| AppError::BadRequest(format!("file_index out of bounds: {}", file_index)))?;
     let chunk_size = state.config.chunk_size;
+
+    // Some browser send multiple retries (safari)
+    // Be noted to not count towards total
+    let is_retry = state.has_chunk_been_sent(file_index, chunk_index);
+    if !is_retry {
+        state.mark_chunk_sent(file_index, chunk_index);
+        state.progress.increment_file(file_index);
+    }
 
     // Get or create file handle (lazy initialization)
     let file_handle = state
@@ -69,37 +83,40 @@ pub async fn send_handler(
         .entry(file_index)
         .or_try_insert_with(|| -> Result<Arc<SendFileHandle>> {
             Ok(Arc::new(SendFileHandle::open(
-                file_entry.full_path.clone(),
+                &file_entry.full_path,
                 file_entry.size,
             )?))
         })?
         .value()
         .clone();
 
-    let encrypted_chunk = process_chunk(
+    let encrypted_bytes = process_chunk(
         &file_handle,
         chunk_index,
         state.session.cipher(),
         chunk_size,
         file_entry.size,
         &file_entry.nonce,
+        &state.buffer_pool,
     )
     .await?;
 
     Ok(Response::builder()
         .header(header::CONTENT_TYPE, "application/octet-stream")
-        .body(Body::from(encrypted_chunk))
+        .body(Body::from(encrypted_bytes))
         .context("build response")?)
 }
 
+/// Read, encrypt, and return a single chunk payload.
 async fn process_chunk(
     file_handle: &Arc<SendFileHandle>,
     chunk_index: usize,
-    cipher: &Arc<aes_gcm::Aes256Gcm>,
+    cipher: &Arc<aws_lc_rs::aead::LessSafeKey>,
     chunk_size: u64,
     file_size: u64,
     nonce_str: &str,
-) -> Result<Vec<u8>> {
+    pool: &Arc<BufferPool>,
+) -> Result<Bytes> {
     let start = chunk_index as u64 * chunk_size;
 
     // Validate bounds
@@ -114,49 +131,63 @@ async fn process_chunk(
     let end = std::cmp::min(start + chunk_size, file_size);
     let chunk_len = (end - start) as usize;
 
-    // Read from disk using persistent handle
     let file_handle = file_handle.clone();
-    let buffer = tokio::task::spawn_blocking(move || file_handle.read_chunk(start, chunk_len))
-        .await
-        .context("File read task panicked")??;
-
-    // Prepare data to move into the closure
     let cipher = cipher.clone();
     let nonce_str = nonce_str.to_string();
+    let pool = pool.clone();
 
-    // Offload encryption to a blocking thread
-    // This prevents AES-GCM from stalling the async runtime
+    // Read + encrypt in a single blocking task to avoid double thread-pool scheduling
     tokio::task::spawn_blocking(move || {
+        let mut buffer = pool.take();
+
+        let read_start = std::time::Instant::now();
+        file_handle.read_chunk(start, chunk_len, &mut buffer)?;
+        tracing::debug!(
+            chunk_index,
+            bytes = chunk_len,
+            elapsed_us = read_start.elapsed().as_micros() as u64,
+            "chunk_read"
+        );
+
         let file_nonce = Nonce::from_base64(&nonce_str)?;
-        crypto::encrypt_chunk_at_position(&cipher, &file_nonce, &buffer, chunk_index as u32)
-            .context("Encryption failed")
+
+        let encrypt_start = std::time::Instant::now();
+        crypto::encrypt_chunk_in_place(&cipher, &file_nonce, &mut buffer, chunk_index as u32)
+            .context("Encryption failed")?;
+        tracing::debug!(
+            chunk_index,
+            bytes = buffer.len(),
+            elapsed_us = encrypt_start.elapsed().as_micros() as u64,
+            "chunk_encrypt"
+        );
+
+        // Wrap in Bytes that returns the buffer to the pool on drop
+        Ok(pool.wrap(buffer))
     })
     .await?
 }
 
+/// Mark the transfer complete (idempotent for client retries).
 pub async fn complete_download(
-    Path(token): Path<String>,
-    Query(params): Query<ChunkParams>,
+    BearerToken(token): BearerToken,
+    LockToken(lock_token): LockToken,
     State(state): State<SendAppState>,
 ) -> Result<axum::Json<serde_json::Value>, AppError> {
-
-    // Session must be active and owned to complete
-    let client_id = &params.client_id;
-
-    // If the session is ALREADY completed, resend the success signal
-    // and return 200 OK. Handles the client retrying on network failure.
-    if state.session.complete(&token, client_id) {
-        state.progress.complete();
+    // If the session is ALREADY completed, return 200 OK.
+    // Handles the client retrying on network failure.
+    // file_complete is idempotent so no need to re-signal progress.
+    if state.session.is_completed() {
         return Ok(axum::Json(serde_json::json!({
            "success": true,
            "message": "Already completed"
         })));
     }
 
-    let chunks_sent = state.session.get_chunks_sent();
-    let total_chunks = state.session.get_total_chunks();
+    // Session must be active and owned to complete
+    auth::require_active_session(&state.session, &token, &lock_token)?;
 
-    auth::require_active_session(&state.session, &token, client_id)?;
+    let chunks_sent = state.get_chunks_sent();
+    let total_chunks = state.get_total_chunks();
 
     // Verify all chunks were actually sent
     if chunks_sent < total_chunks {
@@ -168,22 +199,18 @@ pub async fn complete_download(
         );
     }
 
-    state.session.complete(&token, client_id);
+    state.session.complete(&token, &lock_token);
+    mark_all_files_complete(&state);
 
-    // preprepare body
-    let response_body = axum::Json(serde_json::json!({
+    Ok(axum::Json(serde_json::json!({
         "success": true,
         "message": "Download successful. Initiating server shutdown."
-    }));
+    })))
+}
 
-    // Wait until Axum response leaves to signal shutdown on 100%
-    // 50ms should be enough to ensure proper HTTP res
-    let progress_clone = state.progress.clone();
-    tokio::spawn(async move {
-        sleep(Duration::from_millis(50)).await;
-        eprintln!("TUI shutdown signal (100.0) sent successfully. Exiting now.");
-        progress_clone.complete();
-    });
-
-    Ok(response_body)
+fn mark_all_files_complete(state: &SendAppState) {
+    let manifest = state.manifest();
+    for i in 0..manifest.files.len() {
+        state.progress.file_complete(i);
+    }
 }

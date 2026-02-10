@@ -1,16 +1,16 @@
 use anyhow::{Context, Result};
 use positioned_io::{RandomAccessFile, ReadAt};
 use std::fs::File;
-use std::path::PathBuf;
+use std::path::Path;
 
 pub struct SendFileHandle {
     file: RandomAccessFile,
-    path: PathBuf,
     size: u64,
 }
 /// File handle using positioned reads for concurrent chunk serving.
 impl SendFileHandle {
-    pub fn open(path: PathBuf, size: u64) -> Result<Self> {
+    #[tracing::instrument(fields(path = %path.display(), size))]
+    pub fn open(path: &Path, size: u64) -> Result<Self> {
         let file = File::open(&path).context(format!(
             "Failed to open file for sending: {}",
             path.display()
@@ -21,31 +21,104 @@ impl SendFileHandle {
         // On Windows: orders of magnitude faster than direct FileExt
         let file = RandomAccessFile::try_new(file).context("Failed to create RandomAccessFile")?;
 
-        Ok(Self { file, path, size })
+        Ok(Self { file, size })
     }
 
-    /// Positioned read at offset. Thread-safe (takes `&self` not `&mut self`).
-    pub fn read_chunk(&self, offset: u64, len: usize) -> Result<Vec<u8>> {
+    /// Positioned read at offset into a caller-provided buffer.
+    /// Thread-safe (takes `&self` not `&mut self`).
+    ///
+    /// The buffer must have `capacity() >= len`. On success, `buffer.len()` is set to `len`.
+    pub fn read_chunk(&self, offset: u64, len: usize, buffer: &mut Vec<u8>) -> Result<()> {
         if offset >= self.size {
             anyhow::bail!("Chunk offset {} exceeds file size {}", offset, self.size);
         }
 
-        let mut buffer = vec![0u8; len];
+        if buffer.capacity() < len {
+            anyhow::bail!(
+                "buffer capacity {} < requested len {}",
+                buffer.capacity(),
+                len
+            );
+        }
 
-        // RandomAccessFile::read_exact_at is cross-platform and thread-safe
-        // Takes &self (not &mut self), safe for concurrent reads
+        // SAFETY: read_exact_at either fills all `len` bytes or returns Err,
+        // so the buffer is fully initialized on the success path.
+        // Caller guarantees capacity >= len (pool buffers are pre-sized).
+        unsafe { buffer.set_len(len) };
+
         self.file
-            .read_exact_at(offset, &mut buffer)
+            .read_exact_at(offset, &mut buffer[..])
             .context(format!("Failed to read chunk at offset {}", offset))?;
 
-        Ok(buffer)
-    }
-
-    pub fn path(&self) -> &PathBuf {
-        &self.path
+        Ok(())
     }
 
     pub fn size(&self) -> u64 {
         self.size
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::panic::AssertUnwindSafe;
+
+    #[test]
+    fn open_accepts_borrowed_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sample.bin");
+        std::fs::write(&path, b"abc").expect("write file");
+
+        let handle = SendFileHandle::open(path.as_path(), 3).expect("open handle");
+        assert_eq!(handle.size(), 3);
+    }
+
+    #[test]
+    fn read_chunk_reads_expected_range() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sample.bin");
+        std::fs::write(&path, b"abcdef").expect("write file");
+
+        let handle = SendFileHandle::open(path.as_path(), 6).expect("open handle");
+        let mut buffer = Vec::with_capacity(3);
+        handle
+            .read_chunk(2, 3, &mut buffer)
+            .expect("read chunk should succeed");
+
+        assert_eq!(&buffer, b"cde");
+    }
+
+    #[test]
+    fn read_chunk_rejects_offset_beyond_file_size() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sample.bin");
+        std::fs::write(&path, b"abc").expect("write file");
+
+        let handle = SendFileHandle::open(path.as_path(), 3).expect("open handle");
+        let mut buffer = Vec::with_capacity(1);
+        let err = handle
+            .read_chunk(3, 1, &mut buffer)
+            .expect_err("offset at EOF should fail");
+
+        assert!(err.to_string().contains("exceeds file size"));
+    }
+
+    #[test]
+    fn read_chunk_returns_error_instead_of_panicking_for_small_buffer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sample.bin");
+        std::fs::write(&path, b"abcdef").expect("write file");
+
+        let handle = SendFileHandle::open(path.as_path(), 6).expect("open handle");
+        let mut buffer = Vec::with_capacity(2);
+
+        let result =
+            std::panic::catch_unwind(AssertUnwindSafe(|| handle.read_chunk(0, 3, &mut buffer)));
+
+        assert!(result.is_ok(), "read_chunk should not panic");
+        let err = result
+            .expect("read_chunk should not panic")
+            .expect_err("insufficient capacity should return error");
+        assert!(err.to_string().contains("buffer capacity"));
     }
 }
