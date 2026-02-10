@@ -1,15 +1,18 @@
+//! Buffer pooling for chunk responses to reduce allocations.
+
 use bytes::Bytes;
 use std::sync::{Arc, Mutex};
 
-/// Pre-allocated buffer pool that eliminates per-chunk allocation overhead.
+/// Pool of reusable byte buffers for send-chunk responses.
+///
 /// Buffers are returned to the pool via `PooledVec::Drop` when Axum finishes
-/// sending the response body.
 pub struct BufferPool {
     buffers: Mutex<Vec<Vec<u8>>>,
     buffer_capacity: usize,
 }
 
 impl BufferPool {
+    /// Build a pool with `pool_size` buffers of `buffer_capacity`.
     pub fn new(pool_size: usize, buffer_capacity: usize) -> Arc<Self> {
         let buffers = (0..pool_size)
             .map(|_| Vec::with_capacity(buffer_capacity))
@@ -20,7 +23,7 @@ impl BufferPool {
         })
     }
 
-    /// Take a buffer from the pool, or allocate a fresh one if empty.
+    /// Take a reusable buffer, allocating only when pool is empty.
     pub fn take(&self) -> Vec<u8> {
         self.buffers
             .lock()
@@ -29,7 +32,7 @@ impl BufferPool {
             .unwrap_or_else(|| Vec::with_capacity(self.buffer_capacity))
     }
 
-    /// Wrap a filled buffer into `Bytes` that returns to the pool on drop.
+    /// Wrap a buffer as `Bytes` that returns it to the pool on drop.
     pub fn wrap(self: &Arc<Self>, buf: Vec<u8>) -> Bytes {
         Bytes::from_owner(PooledVec {
             data: buf,

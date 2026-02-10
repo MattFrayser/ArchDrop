@@ -23,6 +23,7 @@ pub struct ChunkStorage {
 }
 
 impl ChunkStorage {
+    /// Create storage for one file, resolving name collisions safely.
     pub async fn new(mut dest_path: PathBuf, file_size: u64, chunk_size: u64) -> Result<Self> {
         if let Some(parent) = dest_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -116,14 +117,17 @@ impl ChunkStorage {
         }
     }
 
+    /// Return whether this chunk index is already stored.
     pub fn has_chunk(&self, chunk_index: usize) -> bool {
         self.chunks_received.contains(&chunk_index)
     }
 
+    /// Return the output path used by this storage session.
     pub fn get_path(&self) -> &PathBuf {
         &self.path
     }
 
+    /// Return number of unique chunks written so far.
     pub fn chunk_count(&self) -> usize {
         self.chunks_received.len()
     }
@@ -182,7 +186,7 @@ impl ChunkStorage {
         Ok(())
     }
 
-    // Clean up w/o drop, happy path
+    /// Remove incomplete output and disarm drop cleanup.
     pub async fn cleanup(&mut self) -> Result<()> {
         if !self.disarmed {
             self.disarmed = true; // prevent Drop
@@ -194,7 +198,7 @@ impl ChunkStorage {
         Ok(())
     }
 
-    /// Verifies all chunks received, computes SHA-256, disarms cleanup guard.
+    /// Verify completeness, hash output, and keep finalized file.
     ///
     /// # Returns
     ///
@@ -270,7 +274,7 @@ impl Drop for ChunkStorage {
     }
 }
 
-/// Check if filesystem has enough space for the transfer
+/// Ensure destination filesystem has enough free space.
 /// Returns Ok if sufficient space available, Err otherwise
 pub fn check_disk_space(destination: &std::path::Path, bytes: u64) -> Result<()> {
     use sysinfo::Disks;

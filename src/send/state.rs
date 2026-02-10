@@ -1,3 +1,5 @@
+//! Shared send-session state and transfer-state implementation.
+
 use crate::common::config::TransferSettings;
 use crate::common::{manifest::FileEntry, Manifest, Session, TransferState};
 use crate::crypto::types::EncryptionKey;
@@ -9,13 +11,13 @@ use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+/// Cheaply cloned handle to send state stored behind `Arc`.
 #[derive(Clone)]
 pub struct SendAppState {
     inner: Arc<SendAppStateInner>,
 }
 
-/// Send-specific application state
-/// Stored once behind Arc and cloned cheaply by handlers/router.
+/// Send-specific application state for handlers and progress tracking
 pub struct SendAppStateInner {
     pub session: Session,
     pub manifest: Manifest,
@@ -37,6 +39,7 @@ impl Deref for SendAppState {
 }
 
 impl SendAppState {
+    /// Build send state from session data, manifest, and transfer settings.
     pub fn new(
         session_key: EncryptionKey,
         manifest: Manifest,
@@ -63,38 +66,46 @@ impl SendAppState {
         }
     }
 
+    /// Return the transfer manifest.
     pub fn manifest(&self) -> &Manifest {
         &self.manifest
     }
 
+    /// Return a file entry by manifest index.
     pub fn get_file(&self, index: usize) -> Option<&FileEntry> {
         self.manifest.files.get(index)
     }
 
+    /// Increment sent-chunk counter and return `(sent, total)`.
     pub fn increment_sent_chunk(&self) -> (u64, u64) {
         let new_count = self.chunks_sent.fetch_add(1, Ordering::SeqCst) + 1;
         let total = self.total_chunks.load(Ordering::SeqCst);
         (new_count, total)
     }
 
+    /// Return whether this file/chunk pair was already sent.
     pub fn has_chunk_been_sent(&self, file_index: usize, chunk_index: usize) -> bool {
         self.sent_chunks.contains_key(&(file_index, chunk_index))
     }
 
+    /// Mark a file/chunk pair as sent; true if newly inserted.
     pub fn mark_chunk_sent(&self, file_index: usize, chunk_index: usize) -> bool {
         self.sent_chunks
             .insert((file_index, chunk_index), ())
             .is_none()
     }
 
+    /// Return count of unique file/chunk pairs sent.
     pub fn unique_chunks_sent(&self) -> usize {
         self.sent_chunks.len()
     }
 
+    /// Return total chunk responses served.
     pub fn get_chunks_sent(&self) -> u64 {
         self.chunks_sent.load(Ordering::SeqCst)
     }
 
+    /// Return expected total chunk count for this transfer.
     pub fn get_total_chunks(&self) -> u64 {
         self.total_chunks.load(Ordering::SeqCst)
     }
@@ -157,5 +168,4 @@ mod tests {
 
         assert_eq!(cloned.get_total_chunks(), 9);
     }
-
 }

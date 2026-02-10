@@ -1,14 +1,18 @@
+//! Random-access file reads for concurrent chunk serving.
+
 use anyhow::{Context, Result};
 use positioned_io::{RandomAccessFile, ReadAt};
 use std::fs::File;
 use std::path::Path;
 
+/// Thread-safe random-access handle used by send handlers.
 pub struct SendFileHandle {
     file: RandomAccessFile,
     size: u64,
 }
-/// File handle using positioned reads for concurrent chunk serving.
+
 impl SendFileHandle {
+    /// Open a file handle for chunked reads with expected file size.
     #[tracing::instrument(fields(path = %path.display(), size))]
     pub fn open(path: &Path, size: u64) -> Result<Self> {
         let file = File::open(&path).context(format!(
@@ -24,10 +28,10 @@ impl SendFileHandle {
         Ok(Self { file, size })
     }
 
-    /// Positioned read at offset into a caller-provided buffer.
-    /// Thread-safe (takes `&self` not `&mut self`).
+    /// File handle using positioned reads for concurrent chunk serving.
     ///
-    /// The buffer must have `capacity() >= len`. On success, `buffer.len()` is set to `len`.
+    /// The buffer must have `capacity() >= len`.
+    /// On success, `buffer.len()` is set to `len`.
     pub fn read_chunk(&self, offset: u64, len: usize, buffer: &mut Vec<u8>) -> Result<()> {
         if offset >= self.size {
             anyhow::bail!("Chunk offset {} exceeds file size {}", offset, self.size);
@@ -53,6 +57,7 @@ impl SendFileHandle {
         Ok(())
     }
 
+    /// Return the expected file size for this handle.
     pub fn size(&self) -> u64 {
         self.size
     }

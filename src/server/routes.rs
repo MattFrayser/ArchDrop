@@ -7,7 +7,7 @@ use crate::{
 };
 use axum::{extract::DefaultBodyLimit, routing::*, Router};
 
-/// Create router for send mode
+/// Build the router for send endpoints and web assets.
 pub fn create_send_router(state: &SendAppState) -> Router {
     Router::new()
         .route("/health", get(|| async { "OK" }))
@@ -24,7 +24,7 @@ pub fn create_send_router(state: &SendAppState) -> Router {
         .with_state(state.clone())
 }
 
-/// Create router for receive mode
+/// Start a loopback HTTP server plus tunnel and run one session.
 pub fn create_receive_router(state: &ReceiveAppState) -> Router {
     Router::new()
         .route("/health", get(|| async { "OK" }))

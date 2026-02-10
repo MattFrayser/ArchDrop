@@ -1,3 +1,5 @@
+//! Runtime lifecycle: start servers, run session UI loop, and shutdown.
+
 use crate::common::config::{AppConfig, Transport};
 use crate::common::TransferState;
 use crate::crypto::types::Nonce;
@@ -11,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+/// Start a direct HTTPS server and run one transfer session.
 pub async fn start_https<S: TransferState>(
     server: ServerInstance,
     app_state: S,
@@ -72,6 +75,7 @@ pub async fn start_https<S: TransferState>(
     Ok(port)
 }
 
+/// Start a loopback HTTP server plus tunnel and run one session.
 pub async fn start_tunnel<S: TransferState>(
     server: ServerInstance,
     app_state: S,
@@ -149,6 +153,7 @@ pub async fn start_tunnel<S: TransferState>(
     Ok(port)
 }
 
+/// Run transfer session loop, TUI, signal handling, and cleanup.
 #[allow(clippy::too_many_arguments)]
 async fn run_session<S: TransferState>(
     server_handle: axum_server::Handle,
@@ -250,6 +255,7 @@ enum ShutdownResult {
     Forced,
 }
 
+/// Stop accepting new connections, drain/force transfers, and cleanup state.
 async fn shutdown<S: TransferState>(
     server_handle: axum_server::Handle,
     state: S,
@@ -286,6 +292,7 @@ async fn shutdown<S: TransferState>(
     Ok(())
 }
 
+/// Wait for active transfers to finish, or force quit on Ctrl+C.
 async fn wait_for_transfers<S: TransferState>(
     state: &S,
     status_sender: &tokio::sync::watch::Sender<Option<String>>,

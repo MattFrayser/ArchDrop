@@ -1,7 +1,7 @@
+//! Lock-free transfer progress tracking for TUI snapshots.
+
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-
-use crate::ui::tui::{FileProgress, FileStatus, TransferProgress};
 
 struct FileState {
     names: Vec<String>,
@@ -13,7 +13,6 @@ struct FileState {
 
 /// Lock-free progress tracker using atomics.
 /// File metadata is set once via `init_files()` (backed by OnceLock),
-/// then handlers do atomic increments per chunk.
 /// The TUI calls `snapshot()` on its render tick to build display data.
 pub struct ProgressTracker {
     file_state: OnceLock<FileState>,
@@ -30,6 +29,7 @@ impl Default for ProgressTracker {
 }
 
 impl ProgressTracker {
+    /// Create an empty progress tracker.
     pub fn new() -> Self {
         Self {
             file_state: OnceLock::new(),
@@ -40,7 +40,7 @@ impl ProgressTracker {
         }
     }
 
-    /// Called once from manifest handler. Sets up file tracking.
+    /// Initialize per-file names and expected chunk totals.
     /// Must be called before any increment_file/file_complete calls.
     pub fn init_files(&self, names: Vec<String>, chunk_totals: Vec<u64>) {
         let total: u64 = chunk_totals.iter().sum();
@@ -60,7 +60,7 @@ impl ProgressTracker {
         });
     }
 
-    /// Called per chunk from handlers. Lock-free.
+    /// Record one completed chunk for a file.
     pub fn increment_file(&self, file_index: usize) {
         if let Some(fs) = self.file_state.get() {
             if file_index < fs.done_chunks.len() {
@@ -70,8 +70,8 @@ impl ProgressTracker {
         }
     }
 
-    /// Called when a file transfer is fully complete. Idempotent —
-    /// repeated calls for the same file_index are no-ops.
+    /// Called when a file transfer is fully complete.
+    /// Idempotent — repeated calls for the same file_index are no-ops.
     pub fn file_complete(&self, file_index: usize) {
         if let Some(fs) = self.file_state.get() {
             if file_index < fs.completed.len()
@@ -83,7 +83,7 @@ impl ProgressTracker {
         }
     }
 
-    /// Called on file failure (rare path).
+    /// Mark a file as failed with an error message.
     pub fn file_failed(&self, file_index: usize, error: String) {
         if let Some(fs) = self.file_state.get() {
             if file_index < fs.names.len() {
@@ -93,7 +93,7 @@ impl ProgressTracker {
         }
     }
 
-    /// Called by TUI on each render tick (~50ms). Builds display data from atomics.
+    /// Build a snapshot for TUI rendering.
     pub fn snapshot(&self) -> TransferProgress {
         let Some(fs) = self.file_state.get() else {
             return TransferProgress::default();

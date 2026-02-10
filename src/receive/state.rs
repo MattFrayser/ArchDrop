@@ -1,3 +1,5 @@
+//! Shared receive-session state and transfer-state.
+
 use crate::common::config::TransferSettings;
 use crate::common::{Session, TransferState};
 use crate::crypto::types::EncryptionKey;
@@ -10,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-/// State for a single file being received
+/// Per-file receive state tracked across chunk uploads.
 pub struct FileReceiveState {
     pub storage: ChunkStorage,
     pub total_chunks: usize,
@@ -20,12 +22,13 @@ pub struct FileReceiveState {
     pub file_index: usize,
 }
 
-/// Receive-specific application state
+/// Cheaply cloned handle to receive state
 #[derive(Clone)]
 pub struct ReceiveAppState {
     inner: Arc<ReceiveAppStateInner>,
 }
 
+/// Backing state for receive handlers and progress tracking.
 pub struct ReceiveAppStateInner {
     pub session: Session,
     pub destination: PathBuf,
@@ -45,6 +48,7 @@ impl Deref for ReceiveAppState {
 }
 
 impl ReceiveAppState {
+    /// Build receive state from session key, destination, and settings.
     pub fn new(
         session_key: EncryptionKey,
         destination: PathBuf,
@@ -64,20 +68,24 @@ impl ReceiveAppState {
         }
     }
 
+    /// Return the destination root for received files.
     pub fn destination(&self) -> &PathBuf {
         &self.destination
     }
 
+    /// Set expected total chunk count for this transfer.
     pub fn set_total_chunks(&self, total: u64) {
         self.total_chunks.store(total, Ordering::SeqCst);
     }
 
+    /// Increment received-chunk counter and return `(received, total)`.
     pub fn increment_received_chunk(&self) -> (u64, u64) {
         let chunks_received = self.chunks_received.fetch_add(1, Ordering::SeqCst) + 1;
         let total = self.total_chunks.load(Ordering::SeqCst);
         (chunks_received, total)
     }
 
+    /// Return transfer progress as `(received, total)`.
     pub fn get_progress(&self) -> (u64, u64) {
         let received = self.chunks_received.load(Ordering::SeqCst);
         let total = self.total_chunks.load(Ordering::SeqCst);
@@ -156,5 +164,4 @@ mod tests {
         let (_received, total) = cloned.increment_received_chunk();
         assert_eq!(total, 7);
     }
-
 }

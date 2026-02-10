@@ -1,3 +1,5 @@
+//! Server startup, routing, auth, progress, and runtime orchestration.
+
 // Submodules
 mod api;
 pub mod auth;

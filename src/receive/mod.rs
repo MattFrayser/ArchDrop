@@ -1,3 +1,5 @@
+//! Receive state, storage, and request handlers.
+
 pub mod handlers;
 mod state;
 mod storage;

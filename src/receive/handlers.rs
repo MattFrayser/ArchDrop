@@ -1,3 +1,5 @@
+//! HTTP handlers for manifest intake, chunk upload, and completion.
+
 use std::sync::Arc;
 
 use crate::common::manifest::validate_nonce_counter_chunks;
@@ -15,17 +17,20 @@ use serde_json::{json, Value};
 use tokio::sync::Mutex;
 use tokio_util::bytes::Bytes;
 
+/// Client-declared file entry for receive manifest setup.
 #[derive(serde::Deserialize)]
 pub struct ClientManifestEntry {
     pub relative_path: String,
     pub size: u64,
 }
 
+/// Client manifest used to pre-create receive sessions.
 #[derive(serde::Deserialize)]
 pub struct ClientManifest {
     pub files: Vec<ClientManifestEntry>,
 }
 
+/// Multipart payload for one encrypted chunk upload.
 #[derive(TryFromMultipart)]
 pub struct ChunkUploadRequest {
     #[form_data(limit = "12MB")]
@@ -37,6 +42,7 @@ pub struct ChunkUploadRequest {
     pub nonce: Option<String>,
 }
 
+/// Claim session, validate manifest, and initialize receive state.
 pub async fn receive_manifest(
     BearerToken(token): BearerToken,
     State(state): State<ReceiveAppState>,
@@ -131,6 +137,7 @@ pub async fn receive_manifest(
     })))
 }
 
+/// Accept, decrypt, and persist one uploaded chunk.
 pub async fn receive_handler(
     BearerToken(token): BearerToken,
     LockToken(lock_token): LockToken,
@@ -229,6 +236,8 @@ pub async fn receive_handler(
         "success": true,
     })))
 }
+
+/// Finalize one file upload and return its SHA-256 hash.
 pub async fn finalize_upload(
     BearerToken(token): BearerToken,
     LockToken(lock_token): LockToken,
@@ -285,6 +294,7 @@ pub async fn finalize_upload(
     })))
 }
 
+/// Mark the transfer complete for this receive session.
 pub async fn complete_transfer(
     BearerToken(token): BearerToken,
     LockToken(lock_token): LockToken,

@@ -1,15 +1,18 @@
+//! Request extractors and session-gating helpers for server endpoints.
+
 use async_trait::async_trait;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 
 use crate::common::{session_core::ClaimError, session_core::Session, AppError};
 
+/// Header name carrying the transfer lock token.
 pub const LOCK_HEADER_NAME: &str = "x-transfer-lock";
 
-/// Extracts a bearer token from the `Authorization: Bearer <token>` header.
+/// Extracted bearer token from `Authorization: Bearer <token>`.
 pub struct BearerToken(pub String);
 
-/// Extracts the transfer lock token from the `X-Transfer-Lock` header.
+/// Extracted lock token from `X-Transfer-Lock`.
 pub struct LockToken(pub String);
 
 #[async_trait]
@@ -58,6 +61,7 @@ impl<S: Send + Sync> FromRequestParts<S> for LockToken {
     }
 }
 
+/// Require a currently active session for `(token, lock_token)`.
 pub fn require_active_session(
     session: &Session,
     token: &str,
@@ -69,6 +73,7 @@ pub fn require_active_session(
     Ok(())
 }
 
+/// Claim a session and return its lock token.
 pub fn claim_session(session: &Session, token: &str) -> Result<String, AppError> {
     match session.claim(token) {
         Ok(lock_token) => Ok(lock_token),

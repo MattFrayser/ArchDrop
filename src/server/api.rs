@@ -1,3 +1,5 @@
+//! High-level server builders for send and receive modes.
+
 use super::runtime;
 use crate::common::config::{AppConfig, Transport};
 use crate::common::Manifest;
@@ -11,7 +13,7 @@ use axum::Router;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-// Server configuration
+/// Router and display metadata for a running transfer server.
 pub struct ServerInstance {
     pub app: axum::Router,
     pub display_name: String,
@@ -23,9 +25,7 @@ impl ServerInstance {
     }
 }
 
-//----------------
-// SEND SERVER
-//---------------
+/// Build and run a send server for the selected transport.
 pub async fn start_send_server(
     manifest: Manifest,
     transport: Transport,
@@ -85,9 +85,7 @@ pub async fn start_send_server(
     }
 }
 
-//----------------
-// RECEIVE SERVER
-//----------------
+/// Build and run a receive server for the selected transport.
 pub async fn start_receive_server(
     destination: PathBuf,
     transport: Transport,
