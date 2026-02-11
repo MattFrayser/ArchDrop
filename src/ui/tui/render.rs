@@ -34,6 +34,7 @@ const ACCENT: Color = Color::Rgb(248, 190, 117);
 const LOGO_PIXEL_SIZE: PixelSize = PixelSize::Sextant;
 const PANEL_SIDE_INSET_WIDE: u16 = 6;
 const PANEL_SIDE_INSET_MEDIUM: u16 = 4;
+const STATUS_PANEL_MAX_HEIGHT: u16 = 6;
 
 struct LayoutAreas {
     logo: Rect,
@@ -85,9 +86,8 @@ fn calculate_layout(
     };
 
     let status_height = status_message
-        .map(|message| (message.lines().count() as u16).max(1) + 2)
-        .unwrap_or(0)
-        .max(3);
+        .map(|message| ((message.lines().count() as u16).max(1) + 2).clamp(3, STATUS_PANEL_MAX_HEIGHT))
+        .unwrap_or(0);
 
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -359,4 +359,48 @@ pub fn spawn_tui(
         let ui = TransferUI::new(config, tracker, status_rx);
         ui.run(cancel).await
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn calculate_layout_caps_status_height_for_long_messages() {
+        let long_status = "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10";
+        let areas = calculate_layout(
+            Rect {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 40,
+            },
+            Some(long_status),
+            false,
+            "",
+            false,
+        );
+
+        let status_area = areas.status.expect("status area should exist");
+        assert_eq!(status_area.height, 6);
+    }
+
+    #[test]
+    fn calculate_layout_uses_minimum_status_height_for_short_message() {
+        let areas = calculate_layout(
+            Rect {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 40,
+            },
+            Some("ok"),
+            false,
+            "",
+            false,
+        );
+
+        let status_area = areas.status.expect("status area should exist");
+        assert_eq!(status_area.height, 3);
+    }
 }

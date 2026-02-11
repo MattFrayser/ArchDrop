@@ -9,6 +9,7 @@ use crate::transport::local::{get_local_ip, start_local_server, BindScope, Proto
 use crate::transport::tunnel::Tunnel;
 use crate::ui::tui::{generate_qr, spawn_tui, spinner, spinner_error, spinner_success, TuiConfig};
 use anyhow::{Context, Result};
+use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -20,6 +21,19 @@ fn no_tui_enabled() -> bool {
 fn local_security_warning() -> &'static str {
     "WARNING: Local mode exposes this transfer to your LAN (0.0.0.0).\n\
 On shared/untrusted Wi-Fi, do NOT bypass browser certificate warnings."
+}
+
+fn emit_no_tui_output(
+    url: &str,
+    warning: Option<&str>,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> io::Result<()> {
+    if let Some(message) = warning {
+        writeln!(stderr, "\n{}\n", message)?;
+    }
+    writeln!(stdout, "{}", url)?;
+    Ok(())
 }
 
 /// Start a direct HTTPS server and run one transfer session.
@@ -69,10 +83,12 @@ pub async fn start_https<S: TransferState>(
     };
 
     if no_tui_enabled() {
-        if let Some(warning) = &initial_warning {
-            println!("\n{}\n", warning);
-        }
-        println!("{}", url);
+        let stdout = std::io::stdout();
+        let stderr = std::io::stderr();
+        let mut stdout = stdout.lock();
+        let mut stderr = stderr.lock();
+        emit_no_tui_output(&url, initial_warning.as_deref(), &mut stdout, &mut stderr)
+            .context("failed to write NO_TUI output")?;
     }
 
     run_session(
@@ -149,7 +165,12 @@ pub async fn start_tunnel<S: TransferState>(
         nonce.to_base64()
     );
     if no_tui_enabled() {
-        println!("{}", url);
+        let stdout = std::io::stdout();
+        let stderr = std::io::stderr();
+        let mut stdout = stdout.lock();
+        let mut stderr = stderr.lock();
+        emit_no_tui_output(&url, None, &mut stdout, &mut stderr)
+            .context("failed to write NO_TUI output")?;
     }
 
     run_session(
@@ -461,8 +482,46 @@ mod tests {
     #[test]
     fn local_security_warning_mentions_shared_network_risk() {
         let warning = local_security_warning();
-        assert_eq!(warning.lines().count(), 2);
+        assert!(warning.contains("WARNING: Local mode exposes this transfer to your LAN"));
         assert!(warning.contains("shared/untrusted"));
         assert!(warning.contains("certificate warnings"));
+    }
+
+    #[test]
+    fn no_tui_output_keeps_url_on_stdout_and_warning_on_stderr() {
+        let url = "https://example.test/send#token=abc";
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        emit_no_tui_output(
+            url,
+            Some(local_security_warning()),
+            &mut stdout,
+            &mut stderr,
+        )
+        .expect("no_tui output should write successfully");
+
+        let stdout_text = String::from_utf8(stdout).expect("stdout should be utf8");
+        let stderr_text = String::from_utf8(stderr).expect("stderr should be utf8");
+
+        assert_eq!(stdout_text, format!("{}\n", url));
+        assert!(stderr_text.contains("shared/untrusted"));
+        assert!(stderr_text.contains("certificate warnings"));
+    }
+
+    #[test]
+    fn no_tui_output_without_warning_keeps_stderr_empty() {
+        let url = "https://example.test/send#token=abc";
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        emit_no_tui_output(url, None, &mut stdout, &mut stderr)
+            .expect("no_tui output should write successfully");
+
+        let stdout_text = String::from_utf8(stdout).expect("stdout should be utf8");
+        let stderr_text = String::from_utf8(stderr).expect("stderr should be utf8");
+
+        assert_eq!(stdout_text, format!("{}\n", url));
+        assert!(stderr_text.is_empty());
     }
 }
