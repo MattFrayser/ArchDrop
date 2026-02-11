@@ -1,5 +1,5 @@
 use sha2::{Digest, Sha256};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -21,11 +21,20 @@ pub enum ValidationError {
 
     #[error("Filename contains directory separator")]
     ContainsDirectorySeparator,
+
+    #[error("Invalid destination root")]
+    InvalidRoot,
+
+    #[error("Path escapes destination root")]
+    EscapesRoot,
+
+    #[error("Path contains symlink component")]
+    SymlinkComponent,
 }
 
-//===============
-// Path Handling
-//===============
+// =========
+// Hashing
+// =========
 
 /// Hash path for safe directory name
 pub fn hash_path(path: &str) -> String {
@@ -37,8 +46,12 @@ pub fn hash_path(path: &str) -> String {
     format!("{:x}", hasher.finalize())[..16].to_string()
 }
 
-// Core validation logic shared by both validate_path and validate_filename
-// Checks for: empty strings, null bytes, parent directory traversal, absolute paths
+// ==================
+// Lexical validation
+// ==================
+
+// Core validation logic shared by both validate_path and validate_filename.
+// Checks for: empty strings, null bytes, parent directory traversal, absolute paths.
 fn validate_path_components(path_str: &str) -> Result<(), ValidationError> {
     if path_str.is_empty() {
         return Err(ValidationError::Empty);
@@ -66,14 +79,14 @@ fn validate_path_components(path_str: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
-// Validate paths are safe to use ( used for receiving.)
-// no: parent dir travel, absolute paths, null bytes
+// Validate paths are safe to use (used for receiving).
+// Reject: parent-dir traversal, absolute paths, null bytes.
 pub fn validate_path(path: &str) -> Result<(), ValidationError> {
     validate_path_components(path)
 }
 
-// Validate proper filename (Used for send)
-// no: dir seperators
+// Validate proper filename (used for send).
+// Reject: directory separators.
 pub fn validate_filename(filename: &str) -> Result<(), ValidationError> {
     validate_path_components(filename)?;
 
@@ -84,9 +97,55 @@ pub fn validate_filename(filename: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
+// =========================
+// Receive path confinement
+// =========================
+
+/// Resolve a receive relative path under `root` and enforce confinement.
+///
+/// Rules:
+/// - Lexically valid relative path (`validate_path`)
+/// - Canonical destination root must exist
+/// - Any symlink component in the traversed path is rejected
+/// - Final resolved path must remain under canonical root
+pub fn confine_receive_path(root: &Path, relative: &str) -> Result<PathBuf, ValidationError> {
+    validate_path(relative)?;
+
+    let root_canonical = std::fs::canonicalize(root).map_err(|_| ValidationError::InvalidRoot)?;
+    let mut cursor = root_canonical.clone();
+
+    for component in Path::new(relative).components() {
+        match component {
+            Component::Normal(segment) => {
+                cursor.push(segment);
+
+                if let Ok(meta) = std::fs::symlink_metadata(&cursor) {
+                    if meta.file_type().is_symlink() {
+                        return Err(ValidationError::SymlinkComponent);
+                    }
+                }
+
+                if !cursor.starts_with(&root_canonical) {
+                    return Err(ValidationError::EscapesRoot);
+                }
+            }
+            Component::CurDir => continue,
+            Component::ParentDir => return Err(ValidationError::ContainsParentDir),
+            Component::RootDir => return Err(ValidationError::AbsolutePath),
+            Component::Prefix(_) => return Err(ValidationError::InvalidComponent),
+        }
+    }
+
+    Ok(cursor)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ========================
+    // Lexical validation tests
+    // ========================
 
     // Tests for validate_filename (used for send mode)
     #[test]
@@ -277,5 +336,69 @@ mod tests {
     fn test_validate_path_rejects_empty() {
         // Should fail due to empty path
         assert!(matches!(validate_path(""), Err(ValidationError::Empty)));
+    }
+
+    // ======================
+    // Confinement path tests
+    // ======================
+
+    #[test]
+    fn confine_receive_path_accepts_nested_relative_path() {
+        let root = tempfile::tempdir().expect("tempdir");
+
+        let confined = confine_receive_path(root.path(), "nested/file.txt").expect("confined path");
+
+        assert!(confined.starts_with(root.path()));
+        assert!(confined.ends_with(Path::new("nested/file.txt")));
+    }
+
+    #[test]
+    fn confine_receive_path_rejects_invalid_root() {
+        let root = std::env::temp_dir().join(format!("archdrop-missing-{}", std::process::id()));
+
+        let result = confine_receive_path(&root, "file.txt");
+
+        assert!(matches!(result, Err(ValidationError::InvalidRoot)));
+    }
+
+    #[test]
+    fn confine_receive_path_keeps_parent_dir_rejection() {
+        let root = tempfile::tempdir().expect("tempdir");
+
+        let result = confine_receive_path(root.path(), "../escape.txt");
+
+        assert!(matches!(result, Err(ValidationError::ContainsParentDir)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confine_receive_path_fails_early_on_symlink_component() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        let link = root.path().join("evil");
+        symlink(outside.path(), &link).expect("create symlink");
+
+        let result = confine_receive_path(root.path(), "evil/file.txt");
+
+        assert!(matches!(result, Err(ValidationError::SymlinkComponent)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confine_receive_path_fails_early_on_symlink_leaf() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        let outside_file = outside.path().join("real.txt");
+        std::fs::write(&outside_file, b"data").expect("write outside file");
+        let link = root.path().join("leaf.txt");
+        symlink(&outside_file, &link).expect("create file symlink");
+
+        let result = confine_receive_path(root.path(), "leaf.txt");
+
+        assert!(matches!(result, Err(ValidationError::SymlinkComponent)));
     }
 }

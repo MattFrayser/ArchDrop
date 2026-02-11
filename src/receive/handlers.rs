@@ -101,10 +101,9 @@ pub async fn receive_manifest(
             continue;
         }
 
-        // Validate & create path
-        security::validate_path(&file.relative_path)
+        // Validate + confine path under receive destination root
+        let dest_path = security::confine_receive_path(destination, &file.relative_path)
             .map_err(|e| AppError::BadRequest(format!("bad path: {}", e)))?;
-        let dest_path = destination.join(&file.relative_path);
 
         // Initialize storage (creates/truncates file) safely here in serial order
         let storage = ChunkStorage::new(dest_path, file.size, chunk_size)
