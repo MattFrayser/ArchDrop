@@ -11,7 +11,7 @@ use figment::{
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-const MAX_CHUNK_SIZE: u64 = 64 * 1024 * 1024;
+pub const MAX_TRANSFER_CHUNK_SIZE_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_CONCURRENCY: usize = 256;
 
 const LOCAL_TRANSFER: TransferSettings = TransferSettings {
@@ -171,8 +171,8 @@ impl AppConfig {
             "Invalid config: {name}.chunk_size must be > 0"
         );
         ensure!(
-            transfer.chunk_size <= MAX_CHUNK_SIZE,
-            "Invalid config: {name}.chunk_size must be <= {MAX_CHUNK_SIZE}"
+            transfer.chunk_size <= MAX_TRANSFER_CHUNK_SIZE_BYTES,
+            "Invalid config: {name}.chunk_size must be <= {MAX_TRANSFER_CHUNK_SIZE_BYTES}"
         );
         ensure!(
             transfer.concurrency >= 1,

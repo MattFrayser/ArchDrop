@@ -115,6 +115,8 @@ show_qr = true
 show_url = true
 ```
 
+`chunk_size` must be between `1` and `10485760` bytes (10 MiB). This conservative cap keeps upload chunks within the receiver's multipart/body envelope.
+
 Environment override examples:
 
 ```bash
