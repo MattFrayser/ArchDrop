@@ -3,6 +3,8 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+use crate::common::{FileProgress, FileStatus, TransferProgress};
+
 struct FileState {
     names: Vec<String>,
     total_chunks: Vec<u64>,
@@ -142,7 +144,7 @@ impl ProgressTracker {
 #[cfg(test)]
 mod tests {
     use super::ProgressTracker;
-    use crate::ui::tui::FileStatus;
+    use crate::common::FileStatus;
 
     #[test]
     fn reports_empty_snapshot_before_init() {

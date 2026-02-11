@@ -162,7 +162,7 @@ async fn test_complete_file_upload() {
         ]
     });
 
-    let request = build_json_request(&manifest_uri, manifest, &token);
+    let request = build_json_request(manifest_uri, manifest, &token);
     let response = app
         .clone()
         .oneshot(request)
@@ -202,7 +202,7 @@ async fn test_complete_file_upload() {
     // Finalize
     let finalize_uri = "/receive/finalize";
     let request = with_lock_token(
-        build_finalize_request(&finalize_uri, "test.txt", &token),
+        build_finalize_request(finalize_uri, "test.txt", &token),
         &lock_token,
     );
 
@@ -258,7 +258,7 @@ async fn test_out_of_order_chunks() {
         ]
     });
 
-    let request = build_json_request(&manifest_uri, manifest, &token);
+    let request = build_json_request(manifest_uri, manifest, &token);
     let manifest_response = app
         .clone()
         .oneshot(request)
@@ -340,7 +340,7 @@ async fn test_out_of_order_chunks() {
     // Finalize
     let finalize_uri = "/receive/finalize";
     let request = with_lock_token(
-        build_finalize_request(&finalize_uri, "ordered.bin", &token),
+        build_finalize_request(finalize_uri, "ordered.bin", &token),
         &lock_token,
     );
     app.clone()
@@ -387,7 +387,7 @@ async fn test_concurrent_chunks_same_file() {
         ]
     });
 
-    let request = build_json_request(&manifest_uri, manifest, &token);
+    let request = build_json_request(manifest_uri, manifest, &token);
     let resp = app
         .clone()
         .oneshot(request)
@@ -450,7 +450,7 @@ async fn test_concurrent_chunks_same_file() {
     // Finalize
     let finalize_uri = "/receive/finalize";
     let request = with_lock_token(
-        build_finalize_request(&finalize_uri, "concurrent.bin", &token),
+        build_finalize_request(finalize_uri, "concurrent.bin", &token),
         &lock_token,
     );
 
@@ -506,7 +506,7 @@ async fn test_chunk_wrong_nonce() {
         ]
     });
 
-    let request = build_json_request(&manifest_uri, manifest, &token);
+    let request = build_json_request(manifest_uri, manifest, &token);
     let manifest_response = app
         .clone()
         .oneshot(request)
@@ -611,7 +611,7 @@ async fn test_duplicate_chunk_detection() {
         ]
     });
 
-    let request = build_json_request(&manifest_uri, manifest, &token);
+    let request = build_json_request(manifest_uri, manifest, &token);
     let manifest_response = app
         .clone()
         .oneshot(request)
@@ -702,7 +702,7 @@ async fn test_manifest_overflow_protection() {
     });
 
     let manifest_uri = "/receive/manifest";
-    let request = build_json_request(&manifest_uri, manifest, &token);
+    let request = build_json_request(manifest_uri, manifest, &token);
 
     let response = app
         .clone()
@@ -781,7 +781,7 @@ async fn test_manifest_accepts_small_transfer() {
     });
 
     let manifest_uri = "/receive/manifest";
-    let request = build_json_request(&manifest_uri, manifest, &token);
+    let request = build_json_request(manifest_uri, manifest, &token);
 
     let response = app
         .clone()
@@ -816,7 +816,7 @@ async fn test_manifest_rejects_on_insufficient_space() {
     });
 
     let manifest_uri = "/receive/manifest";
-    let request = build_json_request(&manifest_uri, manifest, &token);
+    let request = build_json_request(manifest_uri, manifest, &token);
 
     let response = app
         .clone()
@@ -845,7 +845,7 @@ async fn test_manifest_empty_files_list() {
     });
 
     let manifest_uri = "/receive/manifest";
-    let request = build_json_request(&manifest_uri, manifest, &token);
+    let request = build_json_request(manifest_uri, manifest, &token);
 
     let response = app
         .clone()

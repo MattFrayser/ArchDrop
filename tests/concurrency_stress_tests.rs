@@ -182,7 +182,7 @@ async fn test_concurrent_different_files_same_directory() {
 
     let manifest = serde_json::json!({ "files": file_entries });
     let manifest_uri = "/receive/manifest";
-    let request = build_json_request(&manifest_uri, manifest, &token);
+    let request = build_json_request(manifest_uri, manifest, &token);
     let manifest_response = app
         .clone()
         .oneshot(request)
@@ -305,7 +305,7 @@ async fn test_concurrent_chunks_different_files() {
 
     let manifest = serde_json::json!({ "files": file_entries });
     let manifest_uri = "/receive/manifest";
-    let request = build_json_request(&manifest_uri, manifest, &token);
+    let request = build_json_request(manifest_uri, manifest, &token);
     let manifest_response = app
         .clone()
         .oneshot(request)
@@ -541,7 +541,7 @@ async fn test_concurrent_chunk_uploads_mutex_contention() {
         }]
     });
     let manifest_uri = "/receive/manifest";
-    let request = build_json_request(&manifest_uri, manifest, &token);
+    let request = build_json_request(manifest_uri, manifest, &token);
     let manifest_response = app
         .clone()
         .oneshot(request)
@@ -666,7 +666,7 @@ async fn test_concurrent_upload_smoke() {
 
     let manifest = serde_json::json!({ "files": file_entries });
     let manifest_uri = "/receive/manifest";
-    let request = build_json_request(&manifest_uri, manifest, &token);
+    let request = build_json_request(manifest_uri, manifest, &token);
     let manifest_response = app
         .clone()
         .oneshot(request)
@@ -752,7 +752,7 @@ async fn test_concurrent_chunks_smoke() {
         }]
     });
     let manifest_uri = "/receive/manifest";
-    let request = build_json_request(&manifest_uri, manifest, &token);
+    let request = build_json_request(manifest_uri, manifest, &token);
     let manifest_response = app
         .clone()
         .oneshot(request)

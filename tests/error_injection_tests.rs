@@ -154,7 +154,7 @@ async fn test_corrupted_nonce_base64() {
     });
 
     let uri = "/receive/manifest";
-    let request = build_json_request(&uri, manifest, &token);
+    let request = build_json_request(uri, manifest, &token);
     let response = app
         .clone()
         .oneshot(request)
@@ -213,7 +213,7 @@ async fn test_chunk_size_mismatch() {
         }]
     });
     let manifest_uri = "/receive/manifest";
-    let request = build_json_request(&manifest_uri, manifest, &token);
+    let request = build_json_request(manifest_uri, manifest, &token);
     let manifest_response = app
         .clone()
         .oneshot(request)
@@ -268,7 +268,7 @@ async fn test_negative_chunk_index() {
         }]
     });
     let manifest_uri = "/receive/manifest";
-    let request = build_json_request(&manifest_uri, manifest, &token);
+    let request = build_json_request(manifest_uri, manifest, &token);
     let manifest_response = app
         .clone()
         .oneshot(request)
@@ -350,7 +350,7 @@ async fn test_partial_multipart_upload() {
         }]
     });
     let manifest_uri = "/receive/manifest";
-    let request = build_json_request(&manifest_uri, manifest, &token);
+    let request = build_json_request(manifest_uri, manifest, &token);
     let manifest_response = app
         .clone()
         .oneshot(request)
@@ -429,7 +429,7 @@ async fn test_permission_denied_file_creation() {
     });
 
     let uri = "/receive/manifest";
-    let request = build_json_request(&uri, manifest, &token);
+    let request = build_json_request(uri, manifest, &token);
     let response = app.oneshot(request).await.expect("Failed to send request");
 
     assert_error_response(

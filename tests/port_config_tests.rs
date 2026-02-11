@@ -17,7 +17,6 @@ fn cli_port_applies_to_effective_transport() {
         let cli_args = CliArgs {
             via: Some(Transport::Local),
             port: Some(9999),
-            ..Default::default()
         };
         let config = load_config(&cli_args).unwrap();
         assert_eq!(config.port(Transport::Local), 9999);
@@ -52,7 +51,6 @@ fn cli_port_applies_only_to_selected_transport() {
             let cli_args = CliArgs {
                 via: Some(Transport::Cloudflare),
                 port: Some(4444),
-                ..Default::default()
             };
 
             let config = load_config(&cli_args).expect("load config");
