@@ -67,11 +67,12 @@ fn inset_horizontal(area: Rect, inset: u16) -> Rect {
 
 fn calculate_layout(
     area: Rect,
-    has_status: bool,
+    status_message: Option<&str>,
     show_qr: bool,
     qr_code: &str,
     show_url: bool,
 ) -> LayoutAreas {
+    let has_status = status_message.is_some();
     let connection_height = if show_qr && !qr_code.is_empty() {
         let qr_lines = qr_code.lines().count() as u16;
         if show_url {
@@ -83,6 +84,11 @@ fn calculate_layout(
         8
     };
 
+    let status_height = status_message
+        .map(|message| (message.lines().count() as u16).max(1) + 2)
+        .unwrap_or(0)
+        .max(3);
+
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(if has_status {
@@ -91,7 +97,7 @@ fn calculate_layout(
                 Constraint::Length(6),
                 Constraint::Length(connection_height),
                 Constraint::Min(4),
-                Constraint::Length(3),
+                Constraint::Length(status_height),
             ]
         } else {
             vec![
@@ -286,7 +292,7 @@ impl TransferUI {
         let frame_area = frame.size();
         let areas = calculate_layout(
             frame_area,
-            self.state.status_message.is_some(),
+            self.state.status_message.as_deref(),
             self.config.show_qr,
             &self.config.qr_code,
             self.config.show_url,

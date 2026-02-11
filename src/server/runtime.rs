@@ -17,6 +17,11 @@ fn no_tui_enabled() -> bool {
     std::env::var("NO_TUI").is_ok()
 }
 
+fn local_security_warning() -> &'static str {
+    "WARNING: Local mode exposes this transfer to your LAN (0.0.0.0).\n\
+On shared/untrusted Wi-Fi, do NOT bypass browser certificate warnings."
+}
+
 /// Start a direct HTTPS server and run one transfer session.
 pub async fn start_https<S: TransferState>(
     server: ServerInstance,
@@ -58,7 +63,15 @@ pub async fn start_https<S: TransferState>(
         nonce.to_base64()
     );
 
+    let initial_warning = match transport {
+        Transport::Local => Some(local_security_warning().to_string()),
+        Transport::Cloudflare | Transport::Tailscale => None,
+    };
+
     if no_tui_enabled() {
+        if let Some(warning) = &initial_warning {
+            println!("\n{}\n", warning);
+        }
         println!("{}", url);
     }
 
@@ -71,6 +84,7 @@ pub async fn start_https<S: TransferState>(
         display_overflow_count,
         tracker,
         url,
+        initial_warning,
         transport,
         config,
     )
@@ -147,6 +161,7 @@ pub async fn start_tunnel<S: TransferState>(
         display_overflow_count,
         tracker,
         url,
+        None,
         transport,
         config,
     )
@@ -166,6 +181,7 @@ async fn run_session<S: TransferState>(
     display_overflow_count: Option<usize>,
     tracker: Arc<ProgressTracker>,
     url: String,
+    initial_status_message: Option<String>,
     transport: Transport,
     config: &AppConfig,
 ) -> Result<()> {
@@ -175,6 +191,9 @@ async fn run_session<S: TransferState>(
 
     // TUI msgs
     let (status_sender, status_receiver) = tokio::sync::watch::channel(None);
+    if let Some(message) = initial_status_message {
+        let _ = status_sender.send(Some(message));
+    }
 
     // Spawn TUI (can be disabled with NO_TUI=1 for debugging)
     let tui_handle = if no_tui_enabled() {
@@ -437,5 +456,13 @@ mod tests {
             "cleanup should run once"
         );
         assert_eq!(state.transfer_count(), 0);
+    }
+
+    #[test]
+    fn local_security_warning_mentions_shared_network_risk() {
+        let warning = local_security_warning();
+        assert_eq!(warning.lines().count(), 2);
+        assert!(warning.contains("shared/untrusted"));
+        assert!(warning.contains("certificate warnings"));
     }
 }

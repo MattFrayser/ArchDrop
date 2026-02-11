@@ -131,6 +131,7 @@ ARCHDROP_CLOUDFLARE_CONCURRENCY=4 archdrop send file.txt --via cloudflare
 - Transport links may differ (`local` HTTPS, `cloudflare` tunnel, `tailscale` funnel), but transfer payloads are encrypted in the app layer.
 - Session credentials (`token`, encryption key, nonce) are embedded in the URL fragment (`#...`), which browsers do not send in HTTP requests.
 - Tunnel providers route traffic but do not receive URL fragments from browser requests.
+- Local mode uses a self-signed cert and LAN binding. On shared/untrusted networks, do not bypass browser certificate warnings; a spoofed host could serve malicious page code and steal session secrets.
 - Recommended defaults:
   - Use `--via local` on trusted LANs (smallest external exposure).
   - Use `--via tailscale` when both devices are in your tailnet and you want identity-based access control.
