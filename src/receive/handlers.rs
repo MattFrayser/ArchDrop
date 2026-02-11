@@ -1,7 +1,7 @@
 //! HTTP handlers for manifest intake, chunk upload, and completion.
 
-use std::sync::Arc;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use crate::common::manifest::validate_nonce_counter_chunks;
 use crate::common::AppError;

@@ -2,6 +2,7 @@
 
 use super::cloudflare::CloudflareTunnel;
 use super::tailscale::TailscaleTunnel;
+use super::with_startup_timeout;
 use crate::common::config::Transport;
 
 use anyhow::Result;
@@ -14,11 +15,15 @@ pub enum Tunnel {
 impl Tunnel {
     #[tracing::instrument(fields(transport = ?transport, port))]
     pub async fn start(transport: Transport, port: u16) -> Result<Self> {
-        match transport {
-            Transport::Local => anyhow::bail!("Local transport does not use tunneling"),
-            Transport::Cloudflare => Ok(Self::Cloudflare(CloudflareTunnel::start(port).await?)),
-            Transport::Tailscale => Ok(Self::Tailscale(TailscaleTunnel::start(port).await?)),
-        }
+        with_startup_timeout(async {
+            match transport {
+                Transport::Local => anyhow::bail!("Local transport does not use tunneling"),
+                Transport::Cloudflare => Ok(Self::Cloudflare(CloudflareTunnel::start(port).await?)),
+                Transport::Tailscale => Ok(Self::Tailscale(TailscaleTunnel::start(port).await?)),
+            }
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("Timed out establishing tunnel"))?
     }
 
     pub fn url(&self) -> &str {

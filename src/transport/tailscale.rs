@@ -6,6 +6,8 @@ use tailscale_localapi::LocalApi;
 use thiserror::Error;
 use tokio::process::Command;
 
+use crate::transport::with_startup_timeout;
+
 /// Active Tailscale tunnel context.
 pub struct TailscaleTunnel {
     url: String,
@@ -23,6 +25,8 @@ enum TailscaleError {
     BinaryMissing,
     #[error("tailscale daemon not available")]
     DaemonUnavailable,
+    #[error("tailscale startup timed out")]
+    StartupTimeout,
     #[error("unknown tailscale error: {0}")]
     Unknown(String),
 }
@@ -44,18 +48,17 @@ struct SystemTailscaleBackend;
 impl TailscaleBackend for SystemTailscaleBackend {
     async fn hostname(&self) -> Result<String, TailscaleError> {
         let client = LocalApi::new_with_socket_path("/var/run/tailscale/tailscaled.sock");
-        let status = client
-            .status()
+        let status = with_startup_timeout(client.status())
             .await
+            .map_err(|_| TailscaleError::StartupTimeout)?
             .map_err(|_| TailscaleError::DaemonUnavailable)?;
         Ok(status.self_status.dnsname.trim_end_matches('.').to_string())
     }
 
     async fn run(&self, args: &[&str]) -> Result<CommandOutput, TailscaleError> {
-        let output = Command::new("tailscale")
-            .args(args)
-            .output()
+        let output = with_startup_timeout(Command::new("tailscale").args(args).output())
             .await
+            .map_err(|_| TailscaleError::StartupTimeout)?
             .map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
                     TailscaleError::BinaryMissing
@@ -124,6 +127,11 @@ fn map_start_error(err: TailscaleError) -> anyhow::Error {
              Make sure Tailscale is installed and running:\n\
              Install: https://tailscale.com/download\n\
              Then run: sudo tailscale up\n\n\
+             Or use a different tunnel provider."
+        ),
+        TailscaleError::StartupTimeout => anyhow!(
+            "Timed out starting Tailscale funnel.\n\n\
+             Check that Tailscale is running and responsive, then try again.\n\n\
              Or use a different tunnel provider."
         ),
         TailscaleError::Unknown(msg) => anyhow!(

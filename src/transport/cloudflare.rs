@@ -9,7 +9,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStderr, Command};
 use tracing::{info, warn};
 
-const TUNNEL_URL_TIMEOUT: Duration = Duration::from_secs(15);
+use crate::transport::with_startup_timeout;
+
 const TUNNEL_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const START_MAX_ATTEMPTS: u8 = 3;
 const START_RETRY_BACKOFF: Duration = Duration::from_millis(300);
@@ -143,9 +144,9 @@ impl CloudflareTunnel {
 
         // Parse stream with timeout
         // reader keeps stream alive after url
-        let url = match wait_for_url(metrics_port, &mut child).await {
-            Ok(u) => u,
-            Err(e) => {
+        let url = match with_startup_timeout(wait_for_url(metrics_port, &mut child)).await {
+            Ok(Ok(u)) => u,
+            Ok(Err(e)) => {
                 if let Err(kill_err) = child.kill().await {
                     warn!(
                         "Failed to kill tunnel process after startup failure: {}",
@@ -153,6 +154,15 @@ impl CloudflareTunnel {
                     );
                 }
                 return Err(e);
+            }
+            Err(_) => {
+                if let Err(kill_err) = child.kill().await {
+                    warn!(
+                        "Failed to kill tunnel process after startup timeout: {}",
+                        kill_err
+                    );
+                }
+                return Err(CloudflareError::UrlTimeout);
             }
         };
 
@@ -197,9 +207,7 @@ async fn wait_for_url(
     let client = reqwest::Client::new();
     let api_url = format!("http://localhost:{}/quicktunnel", metrics_port);
 
-    let deadline = tokio::time::Instant::now() + TUNNEL_URL_TIMEOUT;
-
-    while tokio::time::Instant::now() < deadline {
+    loop {
         if let Some(status) = child
             .try_wait()
             .map_err(|err| CloudflareError::StartupFailed(err.to_string()))?
@@ -208,18 +216,22 @@ async fn wait_for_url(
         }
 
         // silence errors here because we expect them while initializing
-        if let Ok(res) = client.get(&api_url).send().await {
-            if let Ok(json) = res.json::<QuickTunnelResponse>().await {
-                if !json.hostname.is_empty() {
-                    return Ok(format!("https://{}", json.hostname));
+        match with_startup_timeout(client.get(&api_url).send()).await {
+            Ok(Ok(res)) => match with_startup_timeout(res.json::<QuickTunnelResponse>()).await {
+                Ok(Ok(json)) => {
+                    if !json.hostname.is_empty() {
+                        return Ok(format!("https://{}", json.hostname));
+                    }
                 }
-            }
+                Ok(Err(_)) => {}
+                Err(_) => return Err(CloudflareError::UrlTimeout),
+            },
+            Ok(Err(_)) => {}
+            Err(_) => return Err(CloudflareError::UrlTimeout),
         }
 
         tokio::time::sleep(TUNNEL_POLL_INTERVAL).await;
     }
-
-    Err(CloudflareError::UrlTimeout)
 }
 
 fn is_retryable_start_error(error: &CloudflareError) -> bool {
