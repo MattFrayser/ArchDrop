@@ -1,6 +1,7 @@
 //! HTTP handlers for manifest intake, chunk upload, and completion.
 
 use std::sync::Arc;
+use std::collections::HashSet;
 
 use crate::common::manifest::validate_nonce_counter_chunks;
 use crate::common::AppError;
@@ -61,7 +62,15 @@ pub async fn receive_manifest(
 
     // Validate manifest before allocating disk space
     let mut total_size: u64 = 0;
+    let mut seen_relative_paths: HashSet<&str> = HashSet::new();
     for file in &manifest.files {
+        if !seen_relative_paths.insert(&file.relative_path) {
+            return Err(AppError::BadRequest(format!(
+                "duplicate relative_path in manifest: {}",
+                file.relative_path
+            )));
+        }
+
         validate_nonce_counter_chunks(file.size, chunk_size, &file.relative_path)
             .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
@@ -95,11 +104,6 @@ pub async fn receive_manifest(
 
         progress_names.push(filename);
         progress_totals.push(file_chunks);
-
-        // If session already exists (on retry), skip creation to avoid truncating data
-        if receive_session.contains_key(&file_id) {
-            continue;
-        }
 
         // Validate + confine path under receive destination root
         let dest_path = security::confine_receive_path(destination, &file.relative_path)

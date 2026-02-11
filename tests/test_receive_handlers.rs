@@ -916,6 +916,48 @@ async fn test_manifest_accepts_small_transfer() {
 }
 
 #[tokio::test]
+async fn test_manifest_rejects_duplicate_relative_paths() {
+    let temp_dir = setup_temp_dir();
+    let key = EncryptionKey::new();
+    let (app, state) = create_test_app(temp_dir.path().to_path_buf(), key);
+    let token = state.session.token().to_string();
+
+    let manifest = serde_json::json!({
+        "files": [
+            {
+                "relative_path": "dup.bin",
+                "size": 1024
+            },
+            {
+                "relative_path": "dup.bin",
+                "size": 2048
+            }
+        ]
+    });
+
+    let request = build_json_request("/receive/manifest", manifest, &token);
+    let response = app
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("Failed to send manifest");
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "Expected 400 for duplicate manifest paths"
+    );
+
+    let json = extract_json(response).await;
+    let message = json["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        message.contains("duplicate relative_path"),
+        "Expected duplicate path error message, got: {}",
+        message
+    );
+}
+
+#[tokio::test]
 async fn test_manifest_rejects_on_insufficient_space() {
     let temp_dir = setup_temp_dir();
     let key = EncryptionKey::new();
